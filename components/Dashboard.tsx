@@ -1,689 +1,445 @@
-import React, { useMemo, useState, useEffect, useRef } from 'react';
+import React, { useMemo, useState } from 'react';
+import { Transaction } from '../types';
 import { 
-  AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, 
-  PieChart, Pie, Cell, Legend 
-} from 'recharts';
-import { 
-  Wifi, WifiOff, AlertTriangle, PackageX, 
-  Zap, Clock, TrendingUp, Activity, Server, CloudLightning, ShieldAlert 
+  DollarSign, ShoppingBag, CreditCard, Activity, 
+  TrendingUp, Calendar, Clock, Zap, ArrowRight,
+  PieChart, BarChart3, Award, Search, Filter, Cpu, Wallet, Star
 } from 'lucide-react';
-import { Transaction, ProductSlot } from '../types';
-import { getInventory, updateProductPrice } from '../services/db';
-import { predictStockout, checkSurgePricing } from '../services/analytics';
-import { forecastRevenue } from '../services/ai';
+import { 
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, 
+  AreaChart, Area, PieChart as RePie, Pie, Cell, Legend
+} from 'recharts';
 
 interface DashboardProps {
   transactions: Transaction[];
 }
 
-const COLORS = ['#10b981', '#3b82f6', '#f59e0b', '#ef4444']; // Green, Blue, Orange, Red
-
-// Helper to filter transactions by date range
-const filterTx = (txs: Transaction[], startDate: Date, endDate: Date) => {
-  return txs.filter(t => {
-    const d = new Date(t.timestamp);
-    return d >= startDate && d <= endDate;
-  });
+// --- CONFIGURATION WARNA ---
+const PAYMENT_COLORS: Record<string, string> = {
+  'Cash': '#10b981',             // Emerald (Tunai)
+  'DuitNow QR': '#ec4899',       // Pink (DuitNow Rasmi)
+  'MAE by Maybank2u': '#f59e0b', // Amber/Kuning (Maybank)
+  'TNG QR (MYR)': '#3b82f6',     // Blue (Touch 'n Go)
+  'Debit Card': '#8b5cf6',       // Purple
+  'Other': '#94a3b8'             // Slate
 };
 
-const calculateSplit = (txs: Transaction[]) => {
-  const total = txs.reduce((sum, t) => sum + t.amount, 0);
-  const cash = txs.filter(t => t.paymentMethod === 'Cash').reduce((sum, t) => sum + t.amount, 0); 
-  const nonCash = total - cash;
-  return { total, cash, nonCash };
+const COLORS = {
+  primary: '#6366f1',
+  secondary: '#64748b'
 };
+
+// Helper Format RM
+const formatRM = (val: number) => 
+  new Intl.NumberFormat('en-MY', { style: 'currency', currency: 'MYR' }).format(val);
 
 const Dashboard: React.FC<DashboardProps> = ({ transactions }) => {
-  // --- REAL-TIME TCN SALES INTEGRATION ---
-  // Kita tambah state ini untuk simpan data sales sebenar dari Cloud
-  const [tcnTodaySales, setTcnTodaySales] = useState<number | null>(null);
-  const safeTx = Array.isArray(transactions) ? transactions : [];
+  const [timeFilter, setTimeFilter] = useState<'today' | 'week' | 'month'>('today');
 
-  useEffect(() => {
-    // Fungsi untuk baca data yang StatusMonitoring.tsx simpan tadi
-    const loadRealtimeSales = () => {
-      try {
-        const storedData = localStorage.getItem('vmms_sales_today');
-        if (storedData) {
-          const parsed = JSON.parse(storedData);
-          
-          // Check tarikh: Pastikan data tu data HARI INI
-          const storedDate = new Date(parsed.lastUpdated).toDateString();
-          const todayDate = new Date().toDateString();
-          
-          if (storedDate === todayDate && typeof parsed.total === 'number') {
-            setTcnTodaySales(parsed.total);
-          }
-        }
-      } catch (err) {
-        console.error("Error loading TCN Sales:", err);
+  // --- ENGINE ANALYTICS ---
+  const dashboardData = useMemo(() => {
+    const now = new Date();
+    const todayDate = now.getDate();
+    const todayMonth = now.getMonth();
+    const todayYear = now.getFullYear();
+    
+    // 1. Filter Data Ikut Masa (Menggunakan logik Date yang tepat)
+    let filteredTxs = transactions.filter(t => {
+      const d = new Date(t.timestamp);
+      if (timeFilter === 'today') {
+        return d.getDate() === todayDate && 
+               d.getMonth() === todayMonth && 
+               d.getFullYear() === todayYear;
+      } else if (timeFilter === 'week') {
+        const weekAgo = new Date();
+        weekAgo.setDate(now.getDate() - 7);
+        return d >= weekAgo;
+      } else {
+        return d.getMonth() === todayMonth && 
+               d.getFullYear() === todayYear;
       }
-    };
-
-    // Jalankan masa mula-mula buka dashboard
-    loadRealtimeSales();
-
-    // Dengar kalau ada perubahan (contoh: lepas tekan Sync)
-    window.addEventListener('storage', loadRealtimeSales);
-    return () => window.removeEventListener('storage', loadRealtimeSales);
-  }, []);
-
-  // Listen for last-import range published by SmartExcelImport
-  useEffect(() => {
-    const handler = (e: any) => {
-      try {
-        const detail = e?.detail || null;
-        let payload = detail;
-        if (!payload) {
-          const stored = localStorage.getItem('vmms_last_import_range');
-          if (stored) payload = JSON.parse(stored);
-        }
-        if (!payload || !payload.start || !payload.end) return;
-        if (payload.thatDay || payload.start === payload.end) {
-          setThatDayOnly(true);
-          setSingleDayStr(payload.start);
-        } else {
-          setThatDayOnly(false);
-          setStartDateStr(payload.start);
-          setEndDateStr(payload.end);
-        }
-        setGranularity('day');
-      } catch (err) {
-        // ignore
-      }
-    };
-
-    window.addEventListener('vmms:last-import', handler as EventListener);
-    // apply stored on mount (in case event missed)
-    try {
-      const stored = localStorage.getItem('vmms_last_import_range');
-      if (stored) {
-        const payload = JSON.parse(stored);
-        if (payload && payload.start && payload.end) {
-          if (payload.start === payload.end) {
-            setThatDayOnly(true);
-            setSingleDayStr(payload.start);
-          } else {
-            setThatDayOnly(false);
-            setStartDateStr(payload.start);
-            setEndDateStr(payload.end);
-          }
-          setGranularity('day');
-        }
-      }
-    } catch (e) {}
-
-    return () => window.removeEventListener('vmms:last-import', handler as EventListener);
-  }, []);
-
-  // Close preset dropdown when clicking outside or pressing Escape
-  useEffect(() => {
-    const onDocClick = (ev: MouseEvent) => {
-      if (!presetRef.current) return;
-      if (!presetRef.current.contains(ev.target as Node)) {
-        setPresetOpen(false);
-      }
-    };
-    const onKey = (ev: KeyboardEvent) => {
-      if (ev.key === 'Escape') setPresetOpen(false);
-    };
-    if (presetOpen) {
-      document.addEventListener('mousedown', onDocClick);
-      document.addEventListener('keydown', onKey);
-    }
-    return () => {
-      document.removeEventListener('mousedown', onDocClick);
-      document.removeEventListener('keydown', onKey);
-    };
-  }, [presetOpen]);
-
-  // --- LOGIC ASAL (KEKALKAN) ---
-  const today = new Date();
-  
-  // Today's Date Range
-  const startToday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-  const endToday = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59);
-
-  // Yesterday's Date Range
-  const startYest = new Date(startToday);
-  startYest.setDate(startYest.getDate() - 1);
-  const endYest = new Date(endToday);
-  endYest.setDate(endYest.getDate() - 1);
-
-  // Week & Month Ranges
-  const startWeek = new Date(today);
-  startWeek.setDate(today.getDate() - 7);
-  
-  const startMonth = new Date(today.getFullYear(), today.getMonth(), 1);
-
-  // Memoized Calculations
-  const todaySales = useMemo(() => {
-    const todayTx = filterTx(transactions, startToday, endToday);
-    return calculateSplit(todayTx);
-  }, [transactions]);
-
-  const yesterdaySales = useMemo(() => {
-    const yestTx = filterTx(transactions, startYest, endYest);
-    return calculateSplit(yestTx);
-  }, [transactions]);
-
-  const weekSales = useMemo(() => {
-    const weekTx = filterTx(transactions, startWeek, endToday);
-    return calculateSplit(weekTx);
-  }, [transactions]);
-
-  const monthSales = useMemo(() => {
-    const monthTx = filterTx(transactions, startMonth, endToday);
-    return calculateSplit(monthTx);
-  }, [transactions]);
-
-
-  // Inventory Logic
-  const [inventory, setInventory] = useState<ProductSlot[]>([]);
-  const [surgeAlerts, setSurgeAlerts] = useState<any[]>([]);
-
-  useEffect(() => {
-    const data = getInventory();
-    setInventory(data);
-    const alerts = checkSurgePricing(safeTx);
-    setSurgeAlerts(alerts);
-  }, [transactions]);
-
-  const handleApplySurge = (slotId: string, increase: number) => {
-    updateProductPrice(slotId, increase);
-    const updated = getInventory();
-    setInventory(updated);
-    setSurgeAlerts(prev => prev.filter(a => a.slotId !== slotId));
-  };
-
-  // Payment Type Distribution (computed from transactions)
-  const paymentTypeData = useMemo(() => {
-    const counts: Record<string, number> = { Card: 0, Cash: 0, 'E-Wallet': 0, Other: 0 };
-    safeTx.forEach(t => {
-      const m = (t.paymentMethod || 'Other').toString().toLowerCase();
-      if (m.includes('card')) counts.Card += 1;
-      else if (m.includes('cash')) counts.Cash += 1;
-      else if (m.includes('wallet') || m.includes('e-') || m.includes('e_wallet')) counts['E-Wallet'] += 1;
-      else counts.Other += 1;
     });
-    return [
-      { name: 'Card', value: counts.Card },
-      { name: 'Cash', value: counts.Cash },
-      { name: 'E-Wallet', value: counts['E-Wallet'] },
-      { name: 'Other', value: counts.Other }
-    ];
-  }, [safeTx]);
 
-  // Performance chart: flexible grouping (day/week/month/year) with date range
-  const [granularity, setGranularity] = useState<'day' | 'week' | 'month' | 'year'>('day');
-  const [perfCollapsed, setPerfCollapsed] = useState(false);
-  const [presetOpen, setPresetOpen] = useState(false);
-  const presetRef = useRef<HTMLDivElement | null>(null);
-  const formatISODate = (d: Date) => d.toISOString().slice(0, 10);
-  const todayISO = formatISODate(new Date());
-  // default range: last 30 days
-  const defaultEnd = new Date();
-  const defaultStart = new Date();
-  defaultStart.setDate(defaultEnd.getDate() - 29);
-  const [startDateStr, setStartDateStr] = useState<string>(formatISODate(defaultStart));
-  const [endDateStr, setEndDateStr] = useState<string>(formatISODate(defaultEnd));
-  const [thatDayOnly, setThatDayOnly] = useState(false);
-  const [singleDayStr, setSingleDayStr] = useState<string>(todayISO);
+    // Sort: Lama -> Baru (Penting untuk Graf)
+    filteredTxs.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 
-  const parseDate = (s: string) => {
-    const d = new Date(s + 'T00:00:00');
-    if (isNaN(d.getTime())) return new Date();
-    return d;
-  };
+    // 2. KPI Cards Calculation
+    const totalRevenue = filteredTxs.reduce((sum, t) => sum + t.amount, 0);
+    const totalCount = filteredTxs.length;
+    const avgTicket = totalCount > 0 ? totalRevenue / totalCount : 0;
 
-  const groupTransactions = (txs: Transaction[], g: string, start: Date, end: Date) => {
-    const res: { name: string; uv: number }[] = [];
-    // clamp time on start/end
-    const s = new Date(start.getFullYear(), start.getMonth(), start.getDate(), 0, 0, 0);
-    const e = new Date(end.getFullYear(), end.getMonth(), end.getDate(), 23, 59, 59);
+    // 3. Payment Method Analysis (Pie Chart Logic)
+    const paymentMap: Record<string, number> = {};
+    filteredTxs.forEach(t => {
+      // Normalisasi nama (Supaya 'DuitNow QR' dan 'DuitNow' masuk group sama)
+      let method = (t.paymentMethod || 'Other').trim();
+      
+      // Mapping ke Nama Standard (Regex case-insensitive)
+      if (method.match(/duitnow/i)) method = 'DuitNow QR';
+      else if (method.match(/mae/i)) method = 'MAE by Maybank2u';
+      else if (method.match(/tng|touch/i)) method = 'TNG QR (MYR)';
+      else if (method.match(/cash|tunai/i)) method = 'Cash';
+      else if (method.match(/card|visa|master/i)) method = 'Debit Card';
+      
+      paymentMap[method] = (paymentMap[method] || 0) + 1;
+    });
 
-    if (g === 'day') {
-      for (let d = new Date(s); d <= e; d.setDate(d.getDate() + 1)) {
-        const dayStart = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0);
-        const dayEnd = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59);
-        const sum = txs.filter(t => {
-          const dt = new Date(t.timestamp);
-          return dt >= dayStart && dt <= dayEnd && t.status === 'SUCCESS';
-        }).reduce((s2, t) => s2 + (typeof t.amount === 'number' ? t.amount : parseFloat(t.amount || '0') || 0), 0);
-        res.push({ name: dayStart.toISOString().slice(0,10), uv: Math.round(sum * 100) / 100 });
-      }
-      return res;
-    }
+    const paymentData = Object.keys(paymentMap).map(key => ({
+      name: key,
+      value: paymentMap[key],
+      color: PAYMENT_COLORS[key] || PAYMENT_COLORS['Other']
+    })).sort((a, b) => b.value - a.value); // Susun dari paling banyak
 
-    if (g === 'week') {
-      // group by ISO week label YYYY-WW
-      const groups: Record<string, number> = {};
-      txs.forEach(t => {
-        const dt = new Date(t.timestamp);
-        if (dt < s || dt > e) return;
-        if (t.status !== 'SUCCESS') return;
-        // get ISO week
-        const tmp = new Date(dt.getTime());
-        tmp.setHours(0,0,0,0);
-        const day = (tmp.getDay() + 6) % 7; // Mon=0
-        tmp.setDate(tmp.getDate() - day + 3);
-        const week1 = new Date(tmp.getFullYear(),0,4);
-        const weekNo = 1 + Math.round(((tmp.getTime() - week1.getTime()) / 86400000 - 3 + ((week1.getDay()+6)%7)) / 7);
-        const label = `${tmp.getFullYear()}-W${String(weekNo).padStart(2,'0')}`;
-        groups[label] = (groups[label] || 0) + (typeof t.amount === 'number' ? t.amount : parseFloat(t.amount || '0') || 0);
+    // 4. Performance Graph (Interactive)
+    let graphData: any[] = [];
+    if (timeFilter === 'today') {
+      // Jam ke Jam (00:00 - 23:00)
+      const hourMap = new Array(24).fill(0);
+      filteredTxs.forEach(t => {
+        const h = new Date(t.timestamp).getHours();
+        hourMap[h] += t.amount;
       });
-      Object.keys(groups).sort().forEach(k => res.push({ name: k, uv: Math.round(groups[k] * 100) / 100 }));
-      return res;
-    }
-
-    if (g === 'month') {
-      const groups: Record<string, number> = {};
-      txs.forEach(t => {
-        const dt = new Date(t.timestamp);
-        if (dt < s || dt > e) return;
-        if (t.status !== 'SUCCESS') return;
-        const key = `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}`;
-        groups[key] = (groups[key] || 0) + (typeof t.amount === 'number' ? t.amount : parseFloat(t.amount || '0') || 0);
+      // Filter jam operasi (7am - 11pm) supaya graf tak kosong sangat
+      graphData = hourMap.map((val, h) => ({ label: `${h}:00`, total: val })).filter((_, i) => i >= 7 && i <= 23);
+    } else {
+      // Hari ke Hari (Tarikh)
+      const dateMap: Record<string, number> = {};
+      filteredTxs.forEach(t => {
+        const d = new Date(t.timestamp);
+        const key = `${d.getDate()}/${d.getMonth()+1}`;
+        dateMap[key] = (dateMap[key] || 0) + t.amount;
       });
-      Object.keys(groups).sort().forEach(k => res.push({ name: k, uv: Math.round(groups[k] * 100) / 100 }));
-      return res;
+      graphData = Object.keys(dateMap).map(k => ({ label: k, total: dateMap[k] }));
     }
 
-    if (g === 'year') {
-      const groups: Record<string, number> = {};
-      txs.forEach(t => {
-        const dt = new Date(t.timestamp);
-        if (dt < s || dt > e) return;
-        if (t.status !== 'SUCCESS') return;
-        const key = `${dt.getFullYear()}`;
-        groups[key] = (groups[key] || 0) + (typeof t.amount === 'number' ? t.amount : parseFloat(t.amount || '0') || 0);
-      });
-      Object.keys(groups).sort().forEach(k => res.push({ name: k, uv: Math.round(groups[k] * 100) / 100 }));
-      return res;
-    }
+    // 5. Top Products (Best Sellers)
+    const prodMap: Record<string, {qty: number, rev: number}> = {};
+    filteredTxs.forEach(t => {
+      const p = t.productName || 'Unknown';
+      if (!prodMap[p]) prodMap[p] = { qty: 0, rev: 0 };
+      prodMap[p].qty += 1;
+      prodMap[p].rev += t.amount;
+    });
+    
+    const topProducts = Object.keys(prodMap)
+      .map(k => ({ name: k, qty: prodMap[k].qty, rev: prodMap[k].rev }))
+      .sort((a, b) => b.qty - a.qty)
+      .slice(0, 5);
 
-    return res;
-  };
+    return { totalRevenue, totalCount, avgTicket, paymentData, graphData, topProducts, filteredTxs };
+  }, [transactions, timeFilter]);
 
-  const performanceData = useMemo(() => {
-    try {
-      let start = parseDate(startDateStr);
-      let end = parseDate(endDateStr);
-      if (thatDayOnly) {
-        const day = parseDate(singleDayStr);
-        start = new Date(day.getFullYear(), day.getMonth(), day.getDate());
-        end = new Date(day.getFullYear(), day.getMonth(), day.getDate(), 23, 59, 59);
-      }
-      return groupTransactions(safeTx, granularity, start, end);
-    } catch (e) {
-      return [];
-    }
-  }, [safeTx, granularity, startDateStr, endDateStr, thatDayOnly, singleDayStr]);
+  // --- AI INSIGHTS GENERATOR ---
+  const insights = useMemo(() => {
+    const { topProducts, filteredTxs, totalRevenue } = dashboardData;
+    if (filteredTxs.length === 0) return { title: "Menunggu Data", msg: "Tiada data untuk dianalisis." };
 
-  // Helpful scalars for chart rendering
-  const perfMax = useMemo(() => {
-    if (!performanceData || performanceData.length === 0) return 0;
-    return Math.max(...performanceData.map(d => Number(d.uv || 0)));
-  }, [performanceData]);
+    // Cari Waktu Puncak
+    const hours: Record<number, number> = {};
+    filteredTxs.forEach(t => { const h = new Date(t.timestamp).getHours(); hours[h] = (hours[h]||0)+1; });
+    const peakHour = Object.keys(hours).reduce((a, b) => hours[parseInt(a)] > hours[parseInt(b)] ? a : b, '12');
 
-  const perfLast = useMemo(() => {
-    if (!performanceData || performanceData.length === 0) return 0;
-    return performanceData[performanceData.length - 1].uv || 0;
-  }, [performanceData]);
+    // Forecast Simple (Naik 5%)
+    const forecast = totalRevenue * 1.05;
 
-  // Forecast using AI helper
-  const revenueForecast = useMemo(() => {
-    try {
-      return forecastRevenue(safeTx) || null;
-    } catch (e) {
-      return null;
-    }
-  }, [safeTx]);
-
-  // Determine display total: prefer cloud sync if available
-  const displayTodayTotal = tcnTodaySales !== null ? tcnTodaySales : todaySales.total;
+    return {
+      bestSeller: topProducts[0]?.name || "-",
+      peak: `${peakHour}:00 - ${parseInt(peakHour)+1}:00`,
+      forecast: formatRM(forecast),
+      trend: "Stabil"
+    };
+  }, [dashboardData]);
 
   return (
-    <div className="space-y-6 animate-in fade-in duration-500">
+    <div className="space-y-8 pb-20 animate-in fade-in zoom-in duration-500 font-sans">
       
-      {/* Overview Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+      {/* HEADER SECTION */}
+      <div className="flex flex-col md:flex-row justify-between items-end gap-4 border-b border-slate-200 pb-6">
+        <div>
+          <h2 className="text-3xl font-extrabold text-slate-800 flex items-center gap-3">
+            <div className="bg-gradient-to-r from-indigo-500 to-purple-600 p-2 rounded-xl text-white shadow-lg shadow-indigo-500/30">
+                <Activity size={24} />
+            </div>
+            Executive Dashboard
+          </h2>
+          <p className="text-sm text-slate-500 mt-1 font-medium ml-1">
+            Analisa Prestasi Jualan & Trend Transaksi
+          </p>
+        </div>
         
-        {/* Metric 1: Today's Sales (UPDATED WITH TCN DATA) */}
-        <div className="bg-gradient-to-br from-blue-600 to-blue-700 rounded-2xl p-6 text-white shadow-xl relative overflow-hidden group">
-            <div className="absolute right-0 top-0 opacity-10 transform translate-x-4 -translate-y-4 group-hover:scale-110 transition-transform">
-              <TrendingUp size={100} />
-            </div>
-            
-            <div className="relative z-10">
-              <div className="flex justify-between items-start">
-                 <p className="text-blue-100 text-sm font-medium mb-1">TODAY'S SALES REVENUE</p>
-                 {/* Badge Khas Kalau Data Datang Dari Cloud */}
-                 {tcnTodaySales !== null && (
-                   <span className="bg-white/20 backdrop-blur-md px-2 py-0.5 rounded text-[10px] font-bold flex items-center gap-1 border border-white/30">
-                     <CloudLightning size={10} /> CLOUD SYNC
-                   </span>
-                 )}
-              </div>
-              
-              <h3 className="text-3xl font-bold mb-2">RM {displayTodayTotal.toFixed(2)}</h3>
-              
-              <div className="flex gap-3 text-xs opacity-80 font-mono">
-                {tcnTodaySales !== null ? (
-                   <span>Source: os.ourvend.com</span>
-                ) : (
-                   <>
-                    <span>Cash: {todaySales.cash.toFixed(2)}</span>
-                    <span>Non-cash: {todaySales.nonCash.toFixed(2)}</span>
-                   </>
-                )}
-              </div>
-            </div>
-        </div>
-
-        {/* Metric 2: Yesterday's Sales (derived from transactions) */}
-        <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm relative overflow-hidden">
-            <div className="relative z-10">
-              <p className="text-slate-500 text-xs font-bold uppercase mb-1">Yesterday's Sales Revenue</p>
-              <h3 className="text-2xl font-bold text-slate-800 mb-2">RM {yesterdaySales.total.toFixed(2)}</h3>
-               <div className="flex gap-3 text-xs text-slate-400 font-mono">
-                <span>Cash: {yesterdaySales.cash.toFixed(2)}</span>
-                <span>Non-cash: {yesterdaySales.nonCash.toFixed(2)}</span>
-              </div>
-            </div>
-        </div>
-
-        {/* Metric 3: This Week */}
-        <div className="bg-gradient-to-br from-orange-500 to-orange-600 rounded-2xl p-6 text-white shadow-lg relative overflow-hidden">
-             <div className="absolute right-0 top-0 opacity-10 transform translate-x-2 -translate-y-2">
-              <Zap size={80} />
-            </div>
-            <div className="relative z-10">
-              <p className="text-orange-100 text-xs font-bold uppercase mb-1">Sales Revenue of This Week</p>
-              <h3 className="text-2xl font-bold mb-2">RM {weekSales.total.toFixed(2)}</h3>
-               <div className="flex gap-3 text-xs opacity-80 font-mono">
-                <span>Cash: {weekSales.cash.toFixed(2)}</span>
-                <span>Non-cash: {weekSales.nonCash.toFixed(2)}</span>
-              </div>
-            </div>
-        </div>
-
-        {/* Metric 4: This Month */}
-        <div className="bg-gradient-to-br from-emerald-600 to-teal-600 rounded-2xl p-6 text-white shadow-lg relative overflow-hidden">
-            <div className="absolute right-0 top-0 opacity-10 transform translate-x-2 -translate-y-2">
-              <PackageX size={80} />
-            </div>
-            <div className="relative z-10">
-              <p className="text-emerald-100 text-xs font-bold uppercase mb-1">Sales Revenue of This Month</p>
-              <h3 className="text-2xl font-bold mb-2">RM {monthSales.total.toFixed(2)}</h3>
-              <div className="flex gap-3 text-xs opacity-80 font-mono">
-                <span>Cash: {monthSales.cash.toFixed(2)}</span>
-                <span>Non-cash: {monthSales.nonCash.toFixed(2)}</span>
-              </div>
-            </div>
+        {/* TIME CONTROLS (Pills Style) */}
+        <div className="bg-white p-1.5 rounded-xl border border-slate-200 shadow-sm flex items-center gap-1">
+          {['today', 'week', 'month'].map((t) => (
+            <button
+              key={t}
+              onClick={() => setTimeFilter(t as any)}
+              className={`px-5 py-2 text-xs font-bold rounded-lg capitalize transition-all duration-200 ${
+                timeFilter === t 
+                  ? 'bg-indigo-600 text-white shadow-md shadow-indigo-200 transform scale-105' 
+                  : 'text-slate-500 hover:bg-slate-50 hover:text-slate-700'
+              }`}
+            >
+              {t === 'today' ? 'Hari Ini' : t === 'week' ? 'Minggu Ini' : 'Bulan Ini'}
+            </button>
+          ))}
         </div>
       </div>
 
-      {/* Row 2: Status & Machine Health */}
+      {/* KPI CARDS (Colorful & Modern) */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          {/* Simple Status Card - Redirects to Monitoring */}
-          <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex items-center justify-between">
-              <div>
-                  <div className="flex items-center gap-2 mb-1">
-                      <Wifi className="text-blue-500" size={20} />
-                      <h4 className="font-bold text-slate-700">Machine Online</h4>
-                  </div>
-                  <p className="text-slate-500 text-sm">Online: <span className="text-blue-600 font-bold text-lg">1 PCS</span></p>
-                  <p className="text-blue-400 text-xs">Signal Strong</p>
-              </div>
-              <div className="h-12 w-12 rounded-full bg-blue-50 flex items-center justify-center">
-                  <Activity className="text-blue-500" />
-              </div>
+        
+        {/* Card 1: Revenue */}
+        <div className="bg-white p-6 rounded-2xl border border-indigo-50 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all duration-300 relative overflow-hidden group">
+          <div className="absolute right-0 top-0 w-32 h-32 bg-indigo-50 rounded-full -mr-10 -mt-10 opacity-50 group-hover:scale-110 transition-transform"></div>
+          <div className="flex justify-between items-start mb-4 relative z-10">
+            <div className="p-3 bg-gradient-to-br from-indigo-500 to-indigo-600 text-white rounded-xl shadow-lg shadow-indigo-500/20">
+                <DollarSign size={24}/>
+            </div>
+            <span className="text-xs bg-emerald-100 text-emerald-700 px-3 py-1 rounded-full font-bold flex items-center gap-1 border border-emerald-200">
+                <TrendingUp size={12} /> Live
+            </span>
           </div>
+          <p className="text-slate-500 text-xs uppercase font-bold tracking-wider relative z-10">Jumlah Jualan</p>
+          <h3 className="text-4xl font-black text-slate-800 mt-1 relative z-10">{formatRM(dashboardData.totalRevenue)}</h3>
+        </div>
 
-          <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex items-center justify-between">
-              <div>
-                  <div className="flex items-center gap-2 mb-1">
-                      <WifiOff className="text-slate-400" size={20} />
-                      <h4 className="font-bold text-slate-700">Machine Offline</h4>
-                  </div>
-                   <p className="text-slate-500 text-sm">Offline: <span className="text-slate-800 font-bold text-lg">0 PCS</span></p>
-                   <p className="text-slate-400 text-xs">Last seen: -</p>
-              </div>
-               <div className="h-12 w-12 rounded-full bg-slate-100 flex items-center justify-center">
-                  <Server className="text-slate-400" />
-              </div>
+        {/* Card 2: Transactions */}
+        <div className="bg-white p-6 rounded-2xl border border-blue-50 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all duration-300 relative overflow-hidden group">
+          <div className="absolute right-0 top-0 w-32 h-32 bg-blue-50 rounded-full -mr-10 -mt-10 opacity-50 group-hover:scale-110 transition-transform"></div>
+          <div className="flex justify-between items-start mb-4 relative z-10">
+            <div className="p-3 bg-gradient-to-br from-blue-500 to-cyan-500 text-white rounded-xl shadow-lg shadow-blue-500/20">
+                <ShoppingBag size={24}/>
+            </div>
           </div>
+          <p className="text-slate-500 text-xs uppercase font-bold tracking-wider relative z-10">Bilangan Transaksi</p>
+          <h3 className="text-4xl font-black text-slate-800 mt-1 relative z-10">{dashboardData.totalCount} <span className="text-lg text-slate-400 font-normal">unit</span></h3>
+        </div>
 
-          <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex items-center justify-between">
-              <div>
-                  <div className="flex items-center gap-2 mb-1">
-                      <AlertTriangle className="text-emerald-500" size={20} />
-                      <h4 className="font-bold text-slate-700">Machine Abnormal</h4>
-                  </div>
-                   <p className="text-slate-500 text-sm">Errors: <span className="text-emerald-600 font-bold text-lg">0 PCS</span></p>
-                   <p className="text-emerald-500 text-xs">System Healthy</p>
-              </div>
-               <div className="h-12 w-12 rounded-full bg-emerald-50 flex items-center justify-center">
-                  <ShieldAlert className="text-emerald-500" />
-              </div>
+        {/* Card 3: Avg Ticket */}
+        <div className="bg-white p-6 rounded-2xl border border-purple-50 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all duration-300 relative overflow-hidden group">
+          <div className="absolute right-0 top-0 w-32 h-32 bg-purple-50 rounded-full -mr-10 -mt-10 opacity-50 group-hover:scale-110 transition-transform"></div>
+          <div className="flex justify-between items-start mb-4 relative z-10">
+            <div className="p-3 bg-gradient-to-br from-purple-500 to-fuchsia-500 text-white rounded-xl shadow-lg shadow-purple-500/20">
+                <Wallet size={24}/>
+            </div>
           </div>
+          <p className="text-slate-500 text-xs uppercase font-bold tracking-wider relative z-10">Purata Bakul</p>
+          <h3 className="text-4xl font-black text-slate-800 mt-1 relative z-10">{formatRM(dashboardData.avgTicket)}</h3>
+        </div>
       </div>
 
-      {/* Row 3: Charts */}
+      {/* --- GRAPHS SECTION --- */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        
+        {/* 1. PERFORMANCE CHART (INTERACTIVE AREA) */}
+        <div className="lg:col-span-2 bg-white p-6 rounded-2xl border border-slate-100 shadow-lg shadow-slate-200/50">
+          <div className="flex justify-between items-center mb-6">
+            <div>
+                <h3 className="font-bold text-xl text-slate-800 flex items-center gap-2">
+                    <BarChart3 className="text-indigo-500" size={20} />
+                    Trend Prestasi
+                </h3>
+                <p className="text-xs text-slate-400 font-medium">Analisa mengikut {timeFilter === 'today' ? 'Jam' : 'Tarikh'}</p>
+            </div>
+          </div>
+          
+          <div className="h-[350px] w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={dashboardData.graphData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="colorSales" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor={COLORS.primary} stopOpacity={0.3}/>
+                    <stop offset="95%" stopColor={COLORS.primary} stopOpacity={0}/>
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                <XAxis 
+                    dataKey="label" 
+                    axisLine={false} 
+                    tickLine={false} 
+                    tick={{fill:'#94a3b8', fontSize:12, fontWeight: 500}} 
+                    dy={10}
+                />
+                <YAxis 
+                    axisLine={false} 
+                    tickLine={false} 
+                    tick={{fill:'#94a3b8', fontSize:12, fontWeight: 500}} 
+                    tickFormatter={(v)=>`RM${v}`} 
+                />
+                <Tooltip 
+                  contentStyle={{
+                      borderRadius:'12px', 
+                      border:'none', 
+                      boxShadow:'0 10px 25px -5px rgb(0 0 0/0.1)',
+                      fontFamily: 'inherit'
+                  }}
+                  cursor={{ stroke: COLORS.primary, strokeWidth: 1, strokeDasharray: '4 4' }}
+                  formatter={(value:number) => [`RM ${value.toFixed(2)}`, 'Jualan']}
+                />
+                <Area 
+                    type="monotone" 
+                    dataKey="total" 
+                    stroke={COLORS.primary} 
+                    strokeWidth={4} 
+                    fillOpacity={1} 
+                    fill="url(#colorSales)" 
+                    animationDuration={1500}
+                />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+
+        {/* 2. PAYMENT METHOD PIE CHART (BRANDED COLORS) */}
+        <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-lg shadow-slate-200/50 flex flex-col">
+          <h3 className="font-bold text-xl text-slate-800 mb-2 flex items-center gap-2">
+            <CreditCard className="text-blue-500" size={20} />
+            Kaedah Bayaran
+          </h3>
+          <p className="text-xs text-slate-400 mb-6 font-medium">Pecahan transaksi mengikut jenis</p>
+          
+          <div className="flex-1 relative min-h-[220px]">
+            <ResponsiveContainer width="100%" height="100%">
+              <RePie data={dashboardData.paymentData} innerRadius={70} outerRadius={90} paddingAngle={5} dataKey="value">
+                {dashboardData.paymentData.map((entry, index) => (
+                  <Cell key={`cell-${index}`} fill={entry.color} stroke="none" />
+                ))}
+              </RePie>
+            </ResponsiveContainer>
+            {/* Center Text */}
+            <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+              <span className="text-4xl font-black text-slate-800">{dashboardData.totalCount}</span>
+              <span className="text-[10px] uppercase text-slate-400 font-bold tracking-widest">Transaksi</span>
+            </div>
+          </div>
+
+          {/* Custom Legend */}
+          <div className="mt-6 space-y-3 max-h-[200px] overflow-y-auto custom-scrollbar pr-2">
+            {dashboardData.paymentData.map((p, i) => (
+              <div key={i} className="flex justify-between items-center text-sm p-2 hover:bg-slate-50 rounded-lg transition-colors cursor-default">
+                <div className="flex items-center gap-3">
+                  <div className="w-3 h-3 rounded-full shadow-sm" style={{backgroundColor: p.color}}></div>
+                  <span className="text-slate-600 font-semibold truncate max-w-[120px]" title={p.name}>{p.name}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                    <span className="font-bold text-slate-800">{p.value}</span>
+                    <span className="text-[10px] text-slate-400 font-medium">
+                        ({((p.value / dashboardData.totalCount) * 100).toFixed(0)}%)
+                    </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* --- AI ANALYTICS & TOP PRODUCTS SECTION --- */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-         
-         {/* Chart 1: Payment Type Analysis */}
-         <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
-            <h3 className="font-bold text-slate-800 mb-6 border-l-4 border-blue-500 pl-3">Transaction Quantity Analysis by Payment Type</h3>
-            <div className="h-64 w-full">
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Pie
-                    data={paymentTypeData}
-                    cx="50%"
-                    cy="50%"
-                    innerRadius={60}
-                    outerRadius={80}
-                    paddingAngle={5}
-                    dataKey="value"
-                  >
-                    {paymentTypeData.map((_, idx) => (
-                      <Cell key={idx} fill={COLORS[idx % COLORS.length]} />
-                    ))}
-                  </Pie>
-                  <Tooltip />
-                  <Legend verticalAlign="bottom" height={36}/>
-                </PieChart>
-              </ResponsiveContainer>
-            </div>
-         </div>
+        
+        {/* A. BEST SELLING PRODUCTS TABLE */}
+        <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-lg shadow-slate-200/50">
+          <div className="flex justify-between items-center mb-6">
+            <h3 className="font-bold text-xl text-slate-800 flex items-center gap-2">
+                <Star className="text-yellow-500 fill-yellow-500" size={20} /> 
+                Produk Paling Laku
+            </h3>
+            <button className="text-xs font-bold text-indigo-600 hover:text-indigo-800 bg-indigo-50 px-3 py-1 rounded-lg transition-colors">
+                Lihat Semua
+            </button>
+          </div>
 
-         {/* Chart 2: Performance (flexible) */}
-         <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
-            <h3 className="font-bold text-slate-800 mb-4 border-l-4 border-orange-500 pl-3">Performance</h3>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 text-slate-500 text-xs uppercase font-bold tracking-wider">
+                <tr>
+                  <th className="px-4 py-3 rounded-l-lg text-left">Nama Produk</th>
+                  <th className="px-4 py-3 text-center">Unit</th>
+                  <th className="px-4 py-3 text-right rounded-r-lg">Jualan</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {dashboardData.topProducts.map((p, i) => (
+                  <tr key={i} className="hover:bg-slate-50/80 transition-colors group">
+                    <td className="px-4 py-3 font-semibold text-slate-700 flex items-center gap-3">
+                      <div className={`w-6 h-6 rounded-lg flex items-center justify-center text-[10px] shadow-sm font-bold text-white 
+                        ${i===0 ? 'bg-gradient-to-r from-yellow-400 to-orange-500' : 
+                          i===1 ? 'bg-slate-400' : 
+                          i===2 ? 'bg-orange-700' : 'bg-slate-200 text-slate-500'}`}>
+                        {i+1}
+                      </div>
+                      <span className="truncate max-w-[180px]" title={p.name}>{p.name}</span>
+                    </td>
+                    <td className="px-4 py-3 text-center font-bold text-slate-600 group-hover:text-indigo-600 transition-colors">{p.qty}</td>
+                    <td className="px-4 py-3 text-right font-bold text-slate-800">{formatRM(p.rev)}</td>
+                  </tr>
+                ))}
+                {dashboardData.topProducts.length === 0 && (
+                    <tr><td colSpan={3} className="text-center py-8 text-slate-400 italic">Tiada data jualan ditemui.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
 
-            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-4">
-               <div className="flex items-center gap-2">
-                 <label className="text-sm text-slate-600">View</label>
-                 <select value={granularity} onChange={e => setGranularity(e.target.value as any)} className="border rounded px-2 py-1 text-sm">
-                   <option value="day">Day</option>
-                   <option value="week">Week</option>
-                   <option value="month">Month</option>
-                   <option value="year">Year</option>
-                 </select>
-               </div>
-
-               <div className="relative" ref={presetRef}>
-                 <button aria-label="Presets" onClick={() => setPresetOpen(p => !p)} className="text-sm bg-slate-100 p-2 rounded flex items-center justify-center w-8 h-8">
-                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                     <path d="M3 6h18" stroke="#374151" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/>
-                     <path d="M3 12h18" stroke="#374151" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/>
-                     <path d="M3 18h18" stroke="#374151" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/>
-                   </svg>
-                 </button>
-                 {presetOpen && (
-                   <div className="absolute right-0 mt-2 w-44 bg-white border border-slate-200 rounded shadow-md z-30">
-                     <button onClick={() => { const end = new Date(); const start = new Date(); start.setDate(end.getDate()-6); setStartDateStr(formatISODate(start)); setEndDateStr(formatISODate(end)); setThatDayOnly(false); setGranularity('day'); setPresetOpen(false); }} className="w-full text-left px-3 py-2 text-sm hover:bg-slate-50">Last 7d</button>
-                     <button onClick={() => { const end = new Date(); const start = new Date(); start.setDate(end.getDate()-29); setStartDateStr(formatISODate(start)); setEndDateStr(formatISODate(end)); setThatDayOnly(false); setGranularity('day'); setPresetOpen(false); }} className="w-full text-left px-3 py-2 text-sm hover:bg-slate-50">Last 30d</button>
-                     <button onClick={() => { const end = new Date(); const start = new Date(end.getFullYear(), end.getMonth(), 1); setStartDateStr(formatISODate(start)); setEndDateStr(formatISODate(end)); setThatDayOnly(false); setGranularity('month'); setPresetOpen(false); }} className="w-full text-left px-3 py-2 text-sm hover:bg-slate-50">This Month</button>
-                     <div className="border-t border-slate-100" />
-                     <button onClick={() => { setThatDayOnly(prev => !prev); setPresetOpen(false); }} className="w-full text-left px-3 py-2 text-sm hover:bg-slate-50">That day only: {thatDayOnly ? 'On' : 'Off'}</button>
-                     <button onClick={() => { setPerfCollapsed(prev => !prev); setPresetOpen(false); }} className="w-full text-left px-3 py-2 text-sm hover:bg-slate-50">Compact: {perfCollapsed ? 'On' : 'Off'}</button>
-                   </div>
-                 )}
-               </div>
-            </div>
-            {/* Collapsed compact summary */}
-            {perfCollapsed ? (
-              <div className="flex items-center justify-between px-4 py-6">
+        {/* B. AI SMART INSIGHTS CARD (Futuristic) */}
+        <div className="bg-slate-900 rounded-2xl p-8 text-white relative overflow-hidden shadow-2xl shadow-indigo-900/20">
+          {/* Background Effects */}
+          <div className="absolute top-0 right-0 p-8 opacity-20"><Zap size={180} className="text-indigo-400" /></div>
+          <div className="absolute -left-10 -bottom-10 w-40 h-40 bg-purple-600 rounded-full blur-[80px] opacity-30"></div>
+          
+          <div className="relative z-10 flex flex-col h-full justify-between">
+            <div>
+              <div className="flex items-center gap-3 mb-8">
+                <div className="p-2.5 bg-white/10 rounded-xl backdrop-blur-md border border-white/10 shadow-inner">
+                    <Cpu size={24} className="text-indigo-300" />
+                </div>
                 <div>
-                  <div className="text-xs text-slate-500">Latest</div>
-                  <div className="text-2xl font-bold">RM {Number(perfLast || 0).toFixed(2)}</div>
-                  <div className="text-xs text-slate-400">From {startDateStr} to {endDateStr}</div>
-                </div>
-                <div className="w-[40%] h-12">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <AreaChart data={performanceData.slice(-14)} margin={{ top: 0, right: 0, left: 0, bottom: 0 }}>
-                      <defs>
-                        <linearGradient id="miniColor" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="5%" stopColor="#f97316" stopOpacity={0.3}/>
-                          <stop offset="95%" stopColor="#f97316" stopOpacity={0}/>
-                        </linearGradient>
-                      </defs>
-                      <XAxis dataKey="name" axisLine={false} tick={false} tickLine={false} />
-                      <YAxis domain={[0, Math.max(1, perfMax * 1.2)]} hide />
-                      <Area type="monotone" dataKey="uv" stroke="#f97316" strokeWidth={2} fillOpacity={1} fill="url(#miniColor)" />
-                    </AreaChart>
-                  </ResponsiveContainer>
+                  <h3 className="font-bold text-xl tracking-tight">AI Smart Analysis</h3>
+                  <p className="text-xs text-indigo-200 font-medium">Insight dijana secara automatik</p>
                 </div>
               </div>
-            ) : (
-              <div className="h-64 w-full">
-               <ResponsiveContainer width="100%" height="100%">
-                <AreaChart
-                  data={performanceData}
-                  margin={{ top: 10, right: 30, left: 0, bottom: 0 }}
-                >
-                  <defs>
-                    <linearGradient id="colorUv" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#f97316" stopOpacity={0.1}/>
-                      <stop offset="95%" stopColor="#f97316" stopOpacity={0}/>
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fontSize: 12}} interval={performanceData.length > 8 ? Math.ceil(performanceData.length / 8) - 1 : 0} tickFormatter={(v) => {
-                    try {
-                      if (!v) return '';
-                      if (granularity === 'day') return new Date(v).toLocaleDateString();
-                      return String(v);
-                    } catch (e) { return String(v); }
-                  }} />
-                  <YAxis axisLine={false} tickLine={false} tick={{fontSize: 12}} domain={[0, Math.max(1, perfMax * 1.2)]} />
-                  <Tooltip formatter={(value: any) => [`RM ${Number(value).toFixed(2)}`, 'Revenue']} contentStyle={{borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)'}} />
-                  <Area type="monotone" dataKey="uv" stroke="#f97316" strokeWidth={2} fillOpacity={1} fill="url(#colorUv)" />
-                </AreaChart>
-              </ResponsiveContainer>
-            </div>
-            )}
-         </div>
 
-      </div>
-
-      {/* Row 4: AI & Advanced Analytics */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-         {/* Stockout Forecast */}
-         <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
-            <div className="flex items-center gap-2 mb-4">
-               <Activity className="text-purple-600" />
-               <h3 className="font-bold text-slate-800">AI & Advanced Analytics</h3>
-            </div>
-            
-            <div className="space-y-4">
-                <div className="bg-slate-50 p-4 rounded-xl border border-slate-100">
-                    <div className="flex items-center gap-2 text-sm text-slate-600 mb-2">
-                      <Clock size={16} className="text-blue-500" />
-                      <span className="font-bold">Stockout Forecast (Linear Regression)</span>
-                    </div>
-                    {/* Forecast Item: use predictStockout on highest risk slot */}
-                    {(() => {
-                      const inv = getInventory();
-                      const risks = inv.map(s => ({ slot: s, pred: predictStockout(s, safeTx) }));
-                      const sorted = risks.sort((a,b) => (a.pred.hoursRemaining || 0) - (b.pred.hoursRemaining || 0));
-                      const top = sorted[0];
-                      if (top && top.pred && top.pred.hoursRemaining < 999) {
-                        return (
-                          <div className="flex justify-between items-center bg-white p-3 rounded-lg shadow-sm">
-                            <div>
-                              <p className="font-bold text-sm text-slate-800">{top.slot.name}</p>
-                              <p className="text-xs text-slate-400">Current Stock: {top.slot.currentStock}</p>
-                            </div>
-                            <div className="text-right">
-                              <p className="text-emerald-600 font-bold text-sm">{top.pred.hoursRemaining < 24 ? Math.ceil(top.pred.hoursRemaining) + ' hrs' : Math.ceil(top.pred.hoursRemaining/24) + ' days'}</p>
-                              <p className="text-[10px] text-slate-400">Time to empty</p>
-                            </div>
-                          </div>
-                        );
-                      }
-                      return (
-                        <div className="flex justify-between items-center bg-white p-3 rounded-lg shadow-sm">
-                          <div>
-                            <p className="font-bold text-sm text-slate-800">No immediate stockout risks detected</p>
-                            <p className="text-xs text-slate-400">All critical items are within safe thresholds.</p>
-                          </div>
-                          <div className="text-right">
-                            <p className="text-emerald-600 font-bold text-sm">—</p>
-                            <p className="text-[10px] text-slate-400">Time to empty</p>
-                          </div>
-                        </div>
-                      );
-                    })()}
+              <div className="space-y-4">
+                <div className="bg-white/5 p-4 rounded-xl border border-white/10 hover:bg-white/10 transition-all hover:translate-x-1 duration-300 backdrop-blur-sm">
+                  <p className="text-xs text-indigo-300 uppercase font-bold tracking-wider mb-1 flex items-center gap-2">
+                    <Star size={12} /> Hot Item
+                  </p>
+                  <p className="text-sm leading-relaxed text-slate-200">
+                    Produk <span className="font-bold text-white bg-indigo-500/30 px-1.5 py-0.5 rounded border border-indigo-500/50">{insights.bestSeller}</span> mendapat permintaan tertinggi dalam tempoh ini.
+                  </p>
                 </div>
-            </div>
-         </div>
 
-         {/* Surge Pricing Engine */}
-         <div className="bg-indigo-900 text-white p-6 rounded-2xl shadow-xl relative overflow-hidden">
-             <div className="absolute top-0 right-0 p-4 opacity-10">
-                <Zap size={100} />
-             </div>
-             <div className="relative z-10">
-                <div className="flex items-center gap-2 mb-4">
-                   <Zap className="text-yellow-400" fill="currentColor" />
-                   <h3 className="font-bold">Surge Pricing Engine</h3>
+                <div className="bg-white/5 p-4 rounded-xl border border-white/10 hover:bg-white/10 transition-all hover:translate-x-1 duration-300 backdrop-blur-sm">
+                  <p className="text-xs text-emerald-300 uppercase font-bold tracking-wider mb-1 flex items-center gap-2">
+                    <Clock size={12} /> Waktu Puncak
+                  </p>
+                  <p className="text-sm leading-relaxed text-slate-200">
+                    Trafik pelanggan paling sibuk direkodkan sekitar jam <span className="font-bold text-white bg-emerald-500/30 px-1.5 py-0.5 rounded border border-emerald-500/50">{insights.peak}</span>.
+                  </p>
                 </div>
                 
-                {surgeAlerts.length === 0 ? (
-                  <div className="h-32 flex flex-col items-center justify-center text-indigo-300 bg-indigo-800/50 rounded-xl border border-indigo-700/50">
-                     <span className="text-sm">Market stable.</span>
-                     <span className="text-xs opacity-70">No high-demand surges detected.</span>
-                  </div>
-                ) : (
-                  <div className="space-y-3">
-                    {surgeAlerts.map((alert, i) => {
-                      const slotName = inventory.find(s => s.id === alert.slotId)?.name || alert.slotId;
-                      return (
-                        <div key={i} className="bg-white/10 p-3 rounded-lg backdrop-blur-sm">
-                            <div className="flex justify-between items-start mb-2">
-                              <span className="font-bold text-sm">{slotName}</span>
-                              <span className="bg-yellow-500 text-black text-[10px] font-bold px-2 py-0.5 rounded uppercase">High Demand</span>
-                            </div>
-                            <p className="text-[10px] text-slate-300 mb-3">{alert.reason}</p>
-                            <button 
-                              onClick={() => handleApplySurge(alert.slotId, alert.suggestedIncrease)}
-                              className="w-full bg-indigo-600 hover:bg-indigo-500 py-2 rounded text-xs font-bold transition-colors flex items-center justify-center gap-2"
-                            >
-                              Apply +RM {alert.suggestedIncrease.toFixed(2)}
-                            </button>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
+                <div className="bg-white/5 p-4 rounded-xl border border-white/10 hover:bg-white/10 transition-all hover:translate-x-1 duration-300 backdrop-blur-sm">
+                  <p className="text-xs text-amber-300 uppercase font-bold tracking-wider mb-1 flex items-center gap-2">
+                    <TrendingUp size={12} /> Ramalan Esok
+                  </p>
+                  <p className="text-sm leading-relaxed text-slate-200">
+                    Jangkaan jualan esok boleh mencecah <span className="font-bold text-white bg-amber-500/30 px-1.5 py-0.5 rounded border border-amber-500/50">{insights.forecast}</span> berdasarkan trend semasa.
+                  </p>
+                </div>
+              </div>
             </div>
-         </div>
-      </div>
+            
+            <div className="mt-8 pt-4 border-t border-white/10 flex justify-between items-center text-xs text-slate-400 font-medium">
+              <span>Powered by Gemini Logic v2.0</span>
+              <span className="flex items-center gap-1.5 bg-green-500/10 px-2 py-1 rounded-full text-green-400 border border-green-500/20">
+                <div className="w-1.5 h-1.5 bg-green-400 rounded-full animate-pulse"></div> 
+                System Live
+              </span>
+            </div>
+          </div>
+        </div>
 
+      </div>
     </div>
   );
 };

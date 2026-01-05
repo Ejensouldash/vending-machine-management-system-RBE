@@ -1,108 +1,153 @@
+// app/api/ipay88/backend/route.ts
 
 import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'crypto';
-import { VM_CONFIG } from '@/lib/vm-config';
-import { promises as fs } from 'fs';
+import fs from 'fs';
 import path from 'path';
+import { MERCHANT_KEY, MERCHANT_CODE } from '@/constants';
 
-// OPSG Specification v1.6.4.4 Implementation
+// Lokasi Database (db.json)
+// Kita anggap db.json berada di root folder projek
+const DB_PATH = path.join(process.cwd(), 'db.json');
+
+// Interface untuk struktur data iPay88
+interface IPay88Response {
+  MerchantCode: string;
+  PaymentId: string;
+  RefNo: string;
+  Amount: string;
+  Currency: string;
+  Remark?: string;
+  TransId?: string;
+  AuthCode?: string;
+  Status: string;
+  ErrDesc?: string;
+  Signature: string;
+}
+
+// Helper: Baca Database
+const readDB = () => {
+  try {
+    if (!fs.existsSync(DB_PATH)) return { transactions: [] };
+    const data = fs.readFileSync(DB_PATH, 'utf-8');
+    return JSON.parse(data);
+  } catch (error) {
+    console.error('Error reading DB:', error);
+    return { transactions: [] };
+  }
+};
+
+// Helper: Tulis Database
+const writeDB = (data: any) => {
+  try {
+    fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2));
+  } catch (error) {
+    console.error('Error writing DB:', error);
+  }
+};
 
 export async function POST(req: NextRequest) {
   try {
+    // 1. Terima Data dari iPay88 (Format: x-www-form-urlencoded)
     const formData = await req.formData();
+    
+    // Extract field penting
+    const merchantCode = formData.get('MerchantCode')?.toString() || '';
+    const paymentId = formData.get('PaymentId')?.toString() || '';
+    const refNo = formData.get('RefNo')?.toString() || '';
+    const amount = formData.get('Amount')?.toString() || '0.00';
+    const currency = formData.get('Currency')?.toString() || 'MYR';
+    const status = formData.get('Status')?.toString() || ''; // "1" = Success, "0" = Fail
+    const signature = formData.get('Signature')?.toString() || '';
+    const transId = formData.get('TransId')?.toString() || '';
+    const errDesc = formData.get('ErrDesc')?.toString() || '';
 
-    const merchantCode = (formData.get('MerchantCode') as string) || '';
-    const paymentId = (formData.get('PaymentId') as string) || '';
-    const refNo = (formData.get('RefNo') as string) || '';
-    const amount = (formData.get('Amount') as string) || '0';
-    const currency = (formData.get('Currency') as string) || 'MYR';
-    const status = (formData.get('Status') as string) || '0';
-    const receivedSignature = (formData.get('Signature') as string) || '';
+    console.log(`[iPay88 Backend] Menerima update untuk RefNo: ${refNo}, Status: ${status}`);
 
-    // 1. Signature Verification (server-side using Node crypto)
-    const cleanAmount = amount.replace(/[.,]/g, '');
-    const sourceStr = `${VM_CONFIG.MERCHANT.KEY}${merchantCode}${paymentId}${refNo}${cleanAmount}${currency}${status}`;
+    // 2. VERIFIKASI SIGNATURE (Security Check)
+    // Formula PDF v2.4.3: HMACSHA512(MerchantKey + MerchantCode + PaymentId + RefNo + Amount + Currency + Status)
+    
+    // Penting: Amount mesti bersih dari koma (cth: "1,000.00" jadi "1000.00")
+    const cleanAmount = amount.replace(/,/g, '');
+    
+    const sourceString = MERCHANT_KEY + merchantCode + paymentId + refNo + cleanAmount + currency + status;
+    
+    // Generate signature kita guna SHA512
+    const calculatedSignature = crypto
+      .createHmac('sha512', MERCHANT_KEY)
+      .update(sourceString)
+      .digest('hex'); // PDF v2.4.3 biasanya menggunakan output HEX (huruf kecil)
 
-    const calculatedSignature = crypto.createHash('sha512').update(sourceStr).digest('base64');
-
-    if (calculatedSignature !== receivedSignature) {
-      console.error('iPay88: Signature mismatch');
-      return new NextResponse('Error', { status: 400 });
+    // Compare signature (Case-insensitive)
+    if (calculatedSignature.toLowerCase() !== signature.toLowerCase()) {
+       console.error(`[iPay88 Backend] ❌ SIGNATURE MISMATCH!`);
+       console.error(`Expected: ${calculatedSignature}`);
+       console.error(`Received: ${signature}`);
+       
+       // Walaupun gagal, kita balas RECEIVEOK supaya iPay88 berhenti hantar, 
+       // TAPI kita jangan update status sebagai 'SUCCESS' dalam DB.
+       return new NextResponse('RECEIVEOK'); 
     }
 
-    // If not successful payment, acknowledge and exit (iPay88 expects RECEIVEOK)
-    if (status !== '1') {
-      return new NextResponse('RECEIVEOK', { status: 200 });
+    // 3. UPDATE DATABASE
+    const db = readDB();
+    
+    // Cari transaksi berdasarkan RefNo
+    // (Nota: Dalam db.json anda, mungkin arraynya bernama "transactions" atau "sales")
+    // Kita anggap struktur db.json ada array "transactions" seperti yang biasa digunakan.
+    // Jika tiada array transactions, kita akan buat baru.
+    
+    let transactionFound = false;
+    
+    if (!db.transactions) {
+        db.transactions = [];
     }
 
-    // Identify slot from RefNo
-    const parts = refNo.split('-');
-    const slotId = parts.find(p => p.startsWith('SLOT')) || null;
-
-    // Persist callback to disk (server-side storage)
-    const dataDir = path.join(process.cwd(), 'data');
-    await fs.mkdir(dataDir, { recursive: true });
-
-    const callbacksPath = path.join(dataDir, 'ipay88_callbacks.json');
-    let callbacks: any[] = [];
-    try {
-      const existing = await fs.readFile(callbacksPath, 'utf-8');
-      callbacks = JSON.parse(existing || '[]');
-    } catch (e) {
-      callbacks = [];
-    }
-
-    const callbackRecord = {
-      id: crypto.randomUUID(),
-      merchantCode,
-      paymentId,
-      refNo,
-      amount: parseFloat(amount),
-      currency,
-      status,
-      signature: receivedSignature,
-      slotId,
-      receivedAt: new Date().toISOString()
-    };
-
-    callbacks.unshift(callbackRecord);
-    await fs.writeFile(callbacksPath, JSON.stringify(callbacks, null, 2), 'utf-8');
-
-    // Also append a simple server-side transaction record to data/transactions.json
-    const txPath = path.join(dataDir, 'transactions.json');
-    let txs: any[] = [];
-    try {
-      const t = await fs.readFile(txPath, 'utf-8');
-      txs = JSON.parse(t || '[]');
-    } catch (e) {
-      txs = [];
-    }
-
-    const productConfig = VM_CONFIG.SLOTS.find(s => s.id === slotId) || null;
-    const newTx = {
-      id: crypto.randomUUID(),
-      refNo,
-      paymentId,
-      productName: productConfig ? productConfig.name : 'UNKNOWN',
-      slotId: slotId || 'UNKNOWN',
-      amount: parseFloat(amount) || 0,
-      currency,
-      status: 'SUCCESS',
-      paymentMethod: 'E-Wallet',
-      timestamp: new Date().toISOString()
-    };
-
-    txs.unshift(newTx);
-    await fs.writeFile(txPath, JSON.stringify(txs, null, 2), 'utf-8');
-
-    console.log(`iPay88: Persisted payment ${paymentId} for ${slotId} RM ${amount}`);
-
-    return new NextResponse('RECEIVEOK', {
-      status: 200,
-      headers: { 'Content-Type': 'text/plain' }
+    const updatedTransactions = db.transactions.map((t: any) => {
+      if (t.refNo === refNo) {
+        transactionFound = true;
+        
+        // Update status sahaja
+        const newStatus = status === '1' ? 'SUCCESS' : 'FAILED';
+        
+        console.log(`[iPay88 Backend] ✅ Mengemaskini RefNo ${refNo} kepada status: ${newStatus}`);
+        
+        return {
+          ...t,
+          status: newStatus,
+          paymentId: paymentId,
+          transId: transId, // ID transaksi dari iPay88
+          updatedAt: new Date().toISOString(),
+          errorDescription: status === '0' ? errDesc : undefined
+        };
+      }
+      return t;
     });
+
+    // Jika transaksi tak jumpa (mungkin sebab create terus di payment gateway?), kita boleh insert baru (optional)
+    if (!transactionFound) {
+        console.log(`[iPay88 Backend] ⚠️ Transaksi ${refNo} tiada dalam DB, mencipta rekod baru...`);
+        updatedTransactions.push({
+            refNo,
+            amount: parseFloat(cleanAmount),
+            status: status === '1' ? 'SUCCESS' : 'FAILED',
+            paymentId,
+            transId,
+            currency,
+            timestamp: new Date().toISOString()
+        });
+    }
+
+    // Simpan ke DB
+    db.transactions = updatedTransactions;
+    writeDB(db);
+
+    // 4. BALAS 'RECEIVEOK' (Wajib!)
+    return new NextResponse('RECEIVEOK');
+
   } catch (error) {
-    console.error('iPay88 Backend Error:', error);
-    return new NextResponse('Error', { status: 500 });
+    console.error('[iPay88 Backend Error]', error);
+    // Jika server error, balas 500 supaya iPay88 tahu untuk cuba lagi nanti (optional)
+    return new NextResponse('Error processing request', { status: 500 });
   }
 }

@@ -1,6 +1,7 @@
 import { ProductSlot, Transaction, IPay88CallbackData, WarehouseItem, PurchaseOrder, ServiceTicket, Alarm, Machine, User, AuditLog } from '../types';
 import { VM_CONFIG } from '../lib/vm-config';
 import { constructResponseSignature, generateSignature } from './crypto';
+import * as TCN from './tcn';
 
 const STORAGE_KEYS = {
   STOCK_COUNTS: 'vmms_stock_counts',
@@ -12,14 +13,14 @@ const STORAGE_KEYS = {
   TICKETS: 'vmms_service_tickets',
   ALARMS: 'vmms_alarms',
   MACHINES: 'vmms_machines',
-  USERS: 'vmms_users',         
+  USERS: 'vmms_users_V2',         
   AUDIT_LOGS: 'vmms_audit_logs',
-  // TCN SPECIFIC KEYS (Wajib simpan masa reset)
+  // TCN SPECIFIC KEYS
   SALES_TODAY: 'vmms_sales_today',      
   TX_RECENT: 'vmms_transactions_recent'
 };
 
-// INITIAL SEED MACHINES (Seeded only once if no TCN data)
+// INITIAL SEED MACHINES
 const INITIAL_MACHINES: Machine[] = [
   { id: 'VM-1001', name: 'KPTM Bangi - Lobby', group: 'KPTM Bangi', signal: 4, temp: 4, status: 'ONLINE', door: 'CLOSED', bill: 'OK', coin: 'OK', card: 'OK', stock: 85, lastSync: 'Just now' },
   { id: 'VM-1002', name: 'KPTM Bangi - Hostel A', group: 'KPTM Bangi', signal: 3, temp: 5, status: 'ONLINE', door: 'CLOSED', bill: 'OK', coin: 'LOW', card: 'OK', stock: 42, lastSync: '2 mins ago' },
@@ -30,10 +31,10 @@ const INITIAL_MACHINES: Machine[] = [
 ];
 
 // INITIAL USERS
-const INITIAL_USERS: User[] = [
-  { id: 'U-001', username: 'admin', password: 'password123', fullName: 'Super Admin', role: 'SUPER_ADMIN', isActive: true },
-  { id: 'U-002', username: 'ahmad_tech', password: 'password123', fullName: 'Ahmad Albab', role: 'TECHNICIAN', isActive: true },
-  { id: 'U-003', username: 'sarah_mgr', password: 'password123', fullName: 'Sarah Manager', role: 'MANAGER', isActive: true },
+// Pastikan username/password sepadan dengan apa yang Login.tsx cari
+const INITIAL_USERS: any[] = [
+  { id: 1, username: 'admin', password: 'admin123', name: 'Super Admin', role: 'super_admin', email: 'admin@vmms.local', isActive: true, status: 'active' },
+  { id: 2, username: 'manager', password: 'manager123', name: 'Hafiz Manager', role: 'manager', email: 'manager@vmms.local', isActive: true, status: 'active' },
 ];
 
 // Helper to generate 1 Year of realistic data
@@ -44,9 +45,7 @@ const generateHistoricalData = (): Transaction[] => {
   const oneYearAgo = new Date();
   oneYearAgo.setFullYear(now.getFullYear() - 1);
 
-  // Iterate day by day from 1 year ago to today
   for (let d = new Date(oneYearAgo); d <= now; d.setDate(d.getDate() + 1)) {
-    // Determine daily volume (Weekends slightly busier)
     const dayOfWeek = d.getDay();
     const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
     const baseVolume = isWeekend ? 15 : 8; 
@@ -55,13 +54,9 @@ const generateHistoricalData = (): Transaction[] => {
 
     for (let i = 0; i < dailyCount; i++) {
       const product = products[Math.floor(Math.random() * products.length)];
-      
-      // Randomize time within operation hours (8 AM - 11 PM)
       const time = new Date(d);
       time.setHours(Math.floor(Math.random() * 15) + 8); 
       time.setMinutes(Math.floor(Math.random() * 60));
-
-      // Payment method distribution
       const methodRand = Math.random();
       const method = methodRand > 0.6 ? 'E-Wallet' : methodRand > 0.3 ? 'Cash' : 'Card';
 
@@ -73,22 +68,20 @@ const generateHistoricalData = (): Transaction[] => {
         slotId: product.id,
         amount: product.price,
         currency: 'MYR',
-        status: Math.random() > 0.05 ? 'SUCCESS' : 'FAILED', // 95% Success rate
+        status: Math.random() > 0.05 ? 'SUCCESS' : 'FAILED', 
         paymentMethod: method,
         timestamp: time.toISOString()
       });
     }
   }
-  return txs.reverse(); // Newest first
+  return txs.reverse(); 
 };
 
-// Global Event Emitter for Toasts
 export const notify = (message: string, type: 'success' | 'error' | 'info' | 'warning' = 'info') => {
   const event = new CustomEvent('vmms-toast', { detail: { message, type } });
   window.dispatchEvent(event);
 };
 
-// --- LOGGING UTILITY ---
 export const logAction = (actor: string, action: string, details: string) => {
   const logsData = localStorage.getItem(STORAGE_KEYS.AUDIT_LOGS);
   const logs: AuditLog[] = logsData ? JSON.parse(logsData) : [];
@@ -101,15 +94,14 @@ export const logAction = (actor: string, action: string, details: string) => {
     details
   };
   
-  // Keep last 1000 logs
   logs.unshift(newLog);
   if (logs.length > 1000) logs.pop();
   
   localStorage.setItem(STORAGE_KEYS.AUDIT_LOGS, JSON.stringify(logs));
 };
 
+// --- INITIALIZATION ---
 export const initDB = () => {
-  // Init Stock
   if (!localStorage.getItem(STORAGE_KEYS.STOCK_COUNTS)) {
     const initialStockMap: Record<string, number> = {};
     VM_CONFIG.SLOTS.forEach(slot => {
@@ -118,19 +110,16 @@ export const initDB = () => {
     localStorage.setItem(STORAGE_KEYS.STOCK_COUNTS, JSON.stringify(initialStockMap));
   }
   
-  // Init Machines
   if (!localStorage.getItem(STORAGE_KEYS.MACHINES)) {
     localStorage.setItem(STORAGE_KEYS.MACHINES, JSON.stringify(INITIAL_MACHINES));
   }
 
-  // Init Transactions (Generate 1 Year Data if empty) - will be overwritten if TCN session exists and we sync
   if (!localStorage.getItem(STORAGE_KEYS.TRANSACTIONS)) {
     const historicalData = generateHistoricalData();
     localStorage.setItem(STORAGE_KEYS.TRANSACTIONS, JSON.stringify(historicalData));
     console.log(`Seeded ${historicalData.length} historical transactions.`);
   }
 
-  // Init Prices
   if (!localStorage.getItem(STORAGE_KEYS.PRICES)) {
     const initialPriceMap: Record<string, number> = {};
     VM_CONFIG.SLOTS.forEach(slot => {
@@ -139,7 +128,6 @@ export const initDB = () => {
     localStorage.setItem(STORAGE_KEYS.PRICES, JSON.stringify(initialPriceMap));
   }
   
-  // Init Names
   if (!localStorage.getItem(STORAGE_KEYS.NAMES)) {
     const initialNameMap: Record<string, string> = {};
     VM_CONFIG.SLOTS.forEach(slot => {
@@ -148,72 +136,51 @@ export const initDB = () => {
     localStorage.setItem(STORAGE_KEYS.NAMES, JSON.stringify(initialNameMap));
   }
 
-  // Init Warehouse (New)
   if (!localStorage.getItem(STORAGE_KEYS.WAREHOUSE)) {
     localStorage.setItem(STORAGE_KEYS.WAREHOUSE, JSON.stringify(VM_CONFIG.WAREHOUSE));
   }
 
-  // Init Alarms (New - allow state changes)
   if (!localStorage.getItem(STORAGE_KEYS.ALARMS)) {
     localStorage.setItem(STORAGE_KEYS.ALARMS, JSON.stringify(VM_CONFIG.ALARMS));
   }
 
-  // Init Users
+  // INIT USERS JIKA KOSONG
   if (!localStorage.getItem(STORAGE_KEYS.USERS)) {
     localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(INITIAL_USERS));
   }
 
-  // Init Logs
   if (!localStorage.getItem(STORAGE_KEYS.AUDIT_LOGS)) {
     localStorage.setItem(STORAGE_KEYS.AUDIT_LOGS, JSON.stringify([]));
   }
 };
 
-// --- NEW: Sync initial data from TCN (when bot session cookie exists)
-import * as TCN from './tcn';
-
 export const syncInitialFromTCN = async (days = 30) => {
   try {
-    // Check for session cookie file first
     const sessionResp = await fetch('/session.json', { cache: 'no-store' });
-    if (!sessionResp.ok) {
-      console.log('[DB] No session.json found. Skipping TCN initial sync.');
-      return false;
-    }
+    if (!sessionResp.ok) return false;
 
     const sessionJson = await sessionResp.json();
-    if (!sessionJson?.cookie) {
-      console.log('[DB] session.json present but no cookie field found. Skipping TCN initial sync.');
-      return false;
-    }
+    if (!sessionJson?.cookie) return false;
 
-    // 1. Fetch latest machines
     const machinesResult = await TCN.fetchLiveMachineStatus();
     if (machinesResult.success) {
       localStorage.setItem(STORAGE_KEYS.MACHINES, JSON.stringify(machinesResult.data));
-      console.log(`[DB] Synced ${machinesResult.data.length} machines from TCN.`);
     }
 
-    // 2. Fetch sales for the specified days
     const salesResult = await TCN.fetchSalesHistory(days);
     if (salesResult.success) {
-      // Overwrite transactions with cloud data (user requested real-time data)
       const txs = salesResult.transactions || [];
       txs.sort((a,b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
       localStorage.setItem(STORAGE_KEYS.TRANSACTIONS, JSON.stringify(txs));
 
-      // Store summary for dashboard
       const salesData = {
         total: salesResult.totalSalesToday,
         count: txs.filter(t => new Date(t.timestamp).toDateString() === new Date().toDateString()).length,
         lastUpdated: new Date().toISOString()
       };
       localStorage.setItem(STORAGE_KEYS.SALES_TODAY, JSON.stringify(salesData));
-
-      console.log(`[DB] Synced ${txs.length} transactions from TCN and set today's total RM ${salesResult.totalSalesToday.toFixed(2)}.`);
     }
 
-    // Dispatch to notify UI
     window.dispatchEvent(new Event('storage'));
     window.dispatchEvent(new Event('vmms:txs-updated'));
 
@@ -311,28 +278,27 @@ export const createServiceTicket = (ticket: ServiceTicket) => {
   tickets.unshift(ticket);
   localStorage.setItem(STORAGE_KEYS.TICKETS, JSON.stringify(tickets));
   
-  // Also update alarm to show assigned
   updateAlarmStatus(ticket.alarmId, 'OPEN', ticket.technician);
   logAction('admin', 'DISPATCH_TECH', `Ticket ${ticket.id} assigned to ${ticket.technician}`);
   notify(`Ticket #${ticket.id} dispatched to ${ticket.technician}`, 'success');
 };
 
-// --- USER MANAGEMENT ---
-export const getUsers = (): User[] => {
+// --- USER MANAGEMENT (DIPERBAIKI UNTUK SUPERSETTINGS & LOGIN) ---
+
+export const getUsers = (): any[] => {
   const data = localStorage.getItem(STORAGE_KEYS.USERS);
   return data ? JSON.parse(data) : INITIAL_USERS;
 };
 
 export const saveUser = (user: User) => {
-  const users = getUsers();
-  const existingIdx = users.findIndex(u => u.id === user.id);
+  let users = getUsers();
+  const existingIdx = users.findIndex((u:any) => u.id === user.id);
   
   if (existingIdx >= 0) {
-    // Update
     users[existingIdx] = user;
     logAction('admin', 'UPDATE_USER', `Updated user ${user.username}`);
   } else {
-    // Create
+    if (!user.id) user.id = `U-${Date.now()}`;
     users.push(user);
     logAction('admin', 'CREATE_USER', `Created user ${user.username}`);
   }
@@ -340,12 +306,44 @@ export const saveUser = (user: User) => {
   return true;
 };
 
-export const deleteUser = (userId: string) => {
-  let users = getUsers();
-  const user = users.find(u => u.id === userId);
-  users = users.filter(u => u.id !== userId);
+// Fungsi Baru: Authenticate User (Untuk Login.tsx)
+export const authenticateUser = (username: string, pass: string) => {
+  const users = getUsers();
+  return users.find((u: any) => u.username === username && u.password === pass);
+};
+
+// Fungsi Baru: Add User (Untuk SuperSettings.tsx)
+export const addUser = (user: any) => {
+  const users = getUsers();
+  // Generate ID baru (nombor atau string, kita support dua-dua)
+  const newId = users.length > 0 ? users.length + 1 : 1; 
+  
+  const newUser = {
+    ...user,
+    id: newId, 
+    email: user.email || `${user.username}@vmms.local`,
+    status: 'active'
+  };
+  
+  users.push(newUser);
   localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(users));
-  logAction('admin', 'DELETE_USER', `Deleted user ${user?.username || userId}`);
+  logAction('admin', 'ADD_USER', `Added new user ${user.username}`);
+  return newUser;
+};
+
+// Fungsi Delete (Update supaya support number ID dari SuperSettings)
+export const deleteUser = (userId: string | number) => {
+  let users = getUsers();
+  // Filter keluar user dengan ID tersebut (tak kisah number atau string)
+  const initialLength = users.length;
+  users = users.filter((u:any) => u.id != userId);
+  
+  if (users.length < initialLength) {
+      localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(users));
+      logAction('admin', 'DELETE_USER', `Deleted user ID ${userId}`);
+      return true;
+  }
+  return false;
 };
 
 export const getAuditLogs = (): AuditLog[] => {
@@ -387,7 +385,7 @@ export const updateProductPrice = (slotId: string, newPrice: number): boolean =>
   }
 };
 
-// --- SLOT CONFIGURATION (PENTING UNTUK INVENTORY.TX) ---
+// --- SLOT CONFIGURATION ---
 export const updateSlotConfig = (slotId: string, updates: { name?: string, price?: number, currentStock?: number }): boolean => {
   try {
     if (updates.price !== undefined) updateProductPrice(slotId, updates.price);
@@ -425,17 +423,11 @@ export const saveTransaction = (tx: Transaction) => {
     localStorage.setItem(STORAGE_KEYS.TRANSACTIONS, JSON.stringify(transactions));
 }
 
-// --- NEW FEATURE: MERGE BULK TRANSACTIONS (FOR TCN SYNC) ---
-// This ensures we can sync 1000s of transactions from cloud without losing local transaction history
 export const mergeTransactions = (newTxs: Transaction[]) => {
   const currentTxs = getTransactions();
-  
-  // Create Set of existing RefNos to prevent duplicates
   const existingRefs = new Set(currentTxs.map(t => t.refNo));
-  
   let addedCount = 0;
   
-  // Only add if RefNo doesn't exist
   newTxs.forEach(tx => {
     if (!existingRefs.has(tx.refNo)) {
       currentTxs.push(tx);
@@ -443,48 +435,89 @@ export const mergeTransactions = (newTxs: Transaction[]) => {
     }
   });
 
-  // Sort by date desc
   currentTxs.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-
   localStorage.setItem(STORAGE_KEYS.TRANSACTIONS, JSON.stringify(currentTxs));
   console.log(`Merged ${addedCount} new transactions from Cloud.`);
-  
   return addedCount;
 };
 
-// --- SMART RESET DB (UPDATE UTAMA) ---
-// Memadam semua data MELAINKAN data TCN yang penting
-export const resetDB = () => {
-  logAction('admin', 'SYSTEM_RESET', 'Performing Smart Reset');
-  
-  // 1. Simpan data TCN
-  const tcnMachines = localStorage.getItem(STORAGE_KEYS.MACHINES);
-  const tcnSales = localStorage.getItem(STORAGE_KEYS.SALES_TODAY);
-  const tcnTx = localStorage.getItem(STORAGE_KEYS.TX_RECENT);
+// --- DATA MANAGEMENT FUNCTIONS (GRANULAR) ---
 
-  // 2. Padam Semua
-  localStorage.clear();
-
-  // 3. Pulihkan Data TCN
-  if (tcnMachines) {
-      localStorage.setItem(STORAGE_KEYS.MACHINES, tcnMachines);
-  }
-  if (tcnSales) {
-      localStorage.setItem(STORAGE_KEYS.SALES_TODAY, tcnSales);
-  }
-  if (tcnTx) {
-      localStorage.setItem(STORAGE_KEYS.TX_RECENT, tcnTx);
-  }
-
-  // 4. Initialize semula data asas
-  initDB(); 
-  
-  notify("System Reset Successful (TCN Data Preserved).", "success");
-  window.location.reload();
+export const clearSalesData = () => {
+    try {
+        logAction('admin', 'CLEAR_SALES', 'Cleared all transaction history');
+        localStorage.setItem(STORAGE_KEYS.TRANSACTIONS, JSON.stringify([]));
+        localStorage.removeItem(STORAGE_KEYS.SALES_TODAY);
+        localStorage.removeItem(STORAGE_KEYS.TX_RECENT);
+        console.log("Sales history cleared.");
+        return true;
+    } catch (e) {
+        console.error(e);
+        return false;
+    }
 };
 
+export const resetProductData = () => {
+    try {
+        logAction('admin', 'RESET_PRODUCTS', 'Reset products to factory default');
+        const initialStockMap: Record<string, number> = {};
+        const initialPriceMap: Record<string, number> = {};
+        const initialNameMap: Record<string, string> = {};
+
+        VM_CONFIG.SLOTS.forEach(slot => {
+          initialStockMap[slot.id] = slot.initialStock;
+          initialPriceMap[slot.id] = slot.price;
+          initialNameMap[slot.id] = slot.name;
+        });
+
+        localStorage.setItem(STORAGE_KEYS.STOCK_COUNTS, JSON.stringify(initialStockMap));
+        localStorage.setItem(STORAGE_KEYS.PRICES, JSON.stringify(initialPriceMap));
+        localStorage.setItem(STORAGE_KEYS.NAMES, JSON.stringify(initialNameMap));
+        console.log("Product data reset to default.");
+        return true;
+    } catch (e) {
+        console.error(e);
+        return false;
+    }
+};
+
+export const resetDatabase = () => {
+  try {
+    logAction('admin', 'SYSTEM_RESET', 'Database reset to empty state');
+
+    const keysToReset = [
+      STORAGE_KEYS.TRANSACTIONS, 
+      STORAGE_KEYS.AUDIT_LOGS,   
+      STORAGE_KEYS.SALES_TODAY, 
+      STORAGE_KEYS.POS,          
+      STORAGE_KEYS.TICKETS       
+    ];
+    
+    keysToReset.forEach(key => localStorage.removeItem(key));
+    localStorage.setItem(STORAGE_KEYS.TRANSACTIONS, JSON.stringify([]));
+    localStorage.setItem(STORAGE_KEYS.AUDIT_LOGS, JSON.stringify([]));
+    
+    // Reset Inventory via helper
+    resetProductData();
+
+    // Reset Machines
+    localStorage.setItem(STORAGE_KEYS.MACHINES, JSON.stringify(INITIAL_MACHINES));
+    
+    // RESET USERS JUGA
+    localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(INITIAL_USERS));
+
+    console.log("Database reset to EMPTY state.");
+    return true;
+  } catch (error) {
+    console.error("Failed to reset database:", error);
+    return false;
+  }
+};
+
+// Legacy support if needed
+export const resetDB = resetDatabase;
+
 export const processBackendCallback = async (data: IPay88CallbackData): Promise<{ success: boolean; message: string }> => {
-  // Verify Signature
   const sourceString = constructResponseSignature(
     VM_CONFIG.MERCHANT.KEY,
     data.merchantCode,
@@ -505,7 +538,6 @@ export const processBackendCallback = async (data: IPay88CallbackData): Promise<
     return { success: false, message: "Payment failed status" };
   }
 
-  // Deduct Stock
   const parts = data.refNo.split('-');
   const slotId = parts.find(p => p.startsWith('SLOT'));
   const productConfig = VM_CONFIG.SLOTS.find(s => s.id === slotId);
@@ -525,7 +557,6 @@ export const processBackendCallback = async (data: IPay88CallbackData): Promise<
   stockMap[slotId] = currentStock - 1;
   localStorage.setItem(STORAGE_KEYS.STOCK_COUNTS, JSON.stringify(stockMap));
 
-  // Record Tx
   const newTransaction: Transaction = {
     id: crypto.randomUUID(),
     refNo: data.refNo,

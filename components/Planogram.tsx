@@ -1,4 +1,3 @@
-
 import React, { useState } from 'react';
 import { VM_CONFIG } from '../lib/vm-config';
 import { analyzePlanogram } from '../services/ai';
@@ -37,22 +36,25 @@ export default function Planogram() {
     const txs = getTransactions();
     const now = Date.now();
     const THIRTY_DAYS_MS = 1000 * 60 * 60 * 24 * 30;
+    
     for(let r=1; r<=6; r++) {
       for(let c=1; c<=6; c++) {
         // Pre-fill row 1 for demo purposes
         let product = null;
+        let recentCount = 0; // Fix: Declare here outside the if block
+
         if (r === 1 && c <= 6) {
              const prod = VM_CONFIG.PRODUCT_CATALOG[(c-1) % VM_CONFIG.PRODUCT_CATALOG.length];
              // Compute recent sales velocity from real transactions (last 30 days)
-             const recentCount = txs.filter(t => {
+             recentCount = txs.filter(t => {
                try {
                  const ts = new Date(t.timestamp).getTime();
                  return ts >= (now - THIRTY_DAYS_MS) && (t.productName || '').toLowerCase().includes((prod.name || '').toLowerCase());
                } catch { return false; }
              }).length;
              product = { ...prod };
-             // attach velocity later when building slot
         }
+        
         slots.push({
           row: r, col: c, id: `R${r}-C${c}`, assignedProduct: product,
           capacity: 10, salesVelocity: product ? recentCount : 0

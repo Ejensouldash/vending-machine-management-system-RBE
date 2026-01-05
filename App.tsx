@@ -1,7 +1,10 @@
 import React, { useEffect, useState } from 'react';
-import { initDB, getInventory, getTransactions, resetDB, logAction } from './services/db';
+import { initDB, getInventory, resetDB } from './services/db';
 import { ProductSlot, Transaction } from './types';
-import { VM_CONFIG, TRANSLATIONS } from './lib/vm-config';
+import { VM_CONFIG } from './lib/vm-config';
+
+// Hook Sync
+import { useTransactionSync } from './hooks/useTransactionSync';
 
 // Components
 import Dashboard from './components/Dashboard';
@@ -12,7 +15,6 @@ import Compliance from './components/Compliance';
 import Warehouse from './components/Warehouse';
 import Simulator from './components/Simulator';
 import Planogram from './components/Planogram';
-import Login from './components/Login';
 import StatusMonitoring from './components/StatusMonitoring';
 import Alarms from './components/Alarms';
 import Suppliers from './components/Suppliers';
@@ -20,270 +22,318 @@ import Financials from './components/Financials';
 import SalesAnalytics from './components/SalesAnalytics';
 import AiAssistant from './components/AiAssistant';
 import SuperSettings from './components/SuperSettings';
+import Login from './components/Login'; 
 
-// --- KOMPONEN BARU: SMART EXCEL IMPORT ---
+// Smart Import
 import SmartExcelImport from './components/SmartExcelImport'; 
 
 import { 
   LayoutDashboard, Package, List, RefreshCw, Trash2, ShieldCheck, 
   Map, Truck, Building2, FileText, UserCircle, CreditCard, Scan, 
-  LogOut, Monitor, Bell, ShoppingBag, BarChart3, Globe, X, CheckCircle, AlertTriangle, Info, TrendingUp, Settings
+  LogOut, Monitor, Bell, BarChart3, X, Settings, Users, ChevronDown
 } from 'lucide-react';
 
-type Language = 'en' | 'bm';
+// Definisi Data User
+interface UserData {
+  id: string;
+  name: string;
+  role: 'super_admin' | 'manager';
+  email: string;
+}
+
+const SESSION_KEY = 'vmms_current_session';
 
 const App: React.FC = () => {
-  // Auth State
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [lang, setLang] = useState<Language>('en');
+  // --- AUTH STATE (DENGAN AUTO-LOGIN) ---
+  const [currentUser, setCurrentUser] = useState<UserData | null>(() => {
+    const savedSession = localStorage.getItem(SESSION_KEY);
+    return savedSession ? JSON.parse(savedSession) : null;
+  });
 
-  // Data State
+  // --- APP STATE ---
   const [activeTab, setActiveTab] = useState('dashboard');
+  const { transactions, loading, lastUpdated, refresh } = useTransactionSync([]);
   const [inventory, setInventory] = useState<ProductSlot[]>([]);
-  const [transactions, setTransactions] = useState<Transaction[]>([]);
-  const [loading, setLoading] = useState(true);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
   // Initial Load
   useEffect(() => {
-    const loadData = async () => {
-      try {
-        await initDB();
-        await fetchData();
-        
-        // Check Session
-        const session = sessionStorage.getItem('vm_session');
-        if (session) setIsAuthenticated(true);
-
-        // Load Backup Data dari Excel Terdahulu (jika ada)
-        const cachedSales = localStorage.getItem('salesData');
-        if (cachedSales) {
-            const parsed = JSON.parse(cachedSales);
-            // Gabung dengan data DB jika perlu, atau set terus
-            setTransactions(prev => {
-                // Elak duplicate mudah (check ID/Length)
-                if (prev.length === 0) return parsed;
-                return prev; 
-            });
-        }
-
-      } catch (error) {
-        console.error("Failed to init DB:", error);
-      } finally {
-        setLoading(false);
-      }
-    };
-    loadData();
+    initDB();
+    setInventory(getInventory());
   }, []);
 
-  const fetchData = async () => {
-    const inv = await getInventory();
-    const tx = await getTransactions();
-    setInventory(inv);
-    // Kita guna data dari state jika ada cache Excel, kalau tak guna DB
-    if (tx.length > 0) setTransactions(tx);
+  // --- LOGIN HANDLER ---
+  const handleLogin = (user: UserData) => {
+    setCurrentUser(user); 
+    localStorage.setItem(SESSION_KEY, JSON.stringify(user));
+    setActiveTab('dashboard'); 
   };
 
-  // --- LOGIC BARU: HANDLE SMART IMPORT ---
-  const handleSmartImport = (importedRows: any[]) => {
-    console.log("📥 Data Excel Diterima:", importedRows);
-
-    // Tukar format Excel (Raw) kepada format Sistem (Transaction)
-    // Supaya graf boleh baca
-    const mappedTransactions: Transaction[] = importedRows.map((row, index) => ({
-        id: `EXCEL-${Date.now()}-${index}`,
-        refNo: `IMP-${Math.floor(Math.random() * 10000)}`,
-        paymentId: `PAY-${index}`,
-        productName: row.ProductName || 'Unknown Product',
-        slotId: 'N/A',
-        amount: row.Amount || 0,
-        currency: 'MYR',
-        status: 'SUCCESS',
-        paymentMethod: row.PayType || 'Cash',
-        timestamp: new Date(row.TradeTime).toISOString(), // Pastikan format ISO
-        lhdnStatus: 'PENDING'
-    }));
-
-    // Kemaskini State (Graf akan berubah serta merta)
-    setTransactions(prev => {
-        const combined = [...mappedTransactions, ...prev];
-        // Sort ikut masa (terkini di atas)
-        return combined.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-    });
-
-    // Simpan ke LocalStorage supaya tak hilang bila refresh
-    // (Dalam production sebenar, kita patut simpan ke DB)
-    const currentCache = JSON.parse(localStorage.getItem('salesData') || '[]');
-    const newCache = [...mappedTransactions, ...currentCache];
-    localStorage.setItem('salesData', JSON.stringify(newCache));
-
-    alert(`✅ Berjaya import ${mappedTransactions.length} transaksi! Graf telah dikemaskini.`);
-  };
-
-  const handleLogin = () => {
-    setIsAuthenticated(true);
-    sessionStorage.setItem('vm_session', 'true');
-    logAction('USER_LOGIN', 'User logged in successfully');
-  };
-
+  // --- LOGOUT HANDLER ---
   const handleLogout = () => {
-    setIsAuthenticated(false);
-    sessionStorage.removeItem('vm_session');
-    logAction('USER_LOGOUT', 'User logged out');
-  };
-
-  const handleReset = async () => {
-    if (confirm("Are you sure you want to factory reset? All data will be lost.")) {
-      await resetDB();
-      localStorage.removeItem('salesData'); // Clear cache Excel juga
-      await fetchData();
-      alert("System reset complete.");
+    if (confirm('Anda pasti ingin log keluar?')) {
+      localStorage.removeItem(SESSION_KEY);
+      setCurrentUser(null);
+      setActiveTab('dashboard');
     }
   };
 
-  if (!isAuthenticated) {
+  const userRole = currentUser?.role || 'manager'; 
+
+  // --- DATA HANDLERS ---
+  const fetchData = () => {
+    setInventory(getInventory());
+    refresh(); 
+  };
+
+  const handleSmartImport = (importedTransactions: Transaction[], updatedInventory: ProductSlot[]) => {
+    setInventory(updatedInventory);
+    refresh(); 
+    setActiveTab('dashboard');
+  };
+
+  const handleReset = () => {
+    if (confirm('AMARAN: Ini akan memadam SEMUA data transaksi & reset stok! Teruskan?')) {
+      resetDB();
+      fetchData(); 
+      alert('Sistem telah di-reset ke tetapan kilang.');
+    }
+  };
+
+  // Logic Permission
+  const checkPermission = (tabId: string) => {
+    if (userRole === 'super_admin') return true; 
+    const managerAllowed = [
+      'dashboard', 'status', 'inventory', 'alarms', 
+      'sales_analytics', 'history', 'financials', 'compliance'
+    ];
+    return managerAllowed.includes(tabId);
+  };
+
+  const NavItem = ({ id, icon: Icon, label }: { id: string; icon: any; label: string }) => {
+    if (!checkPermission(id)) return null;
+    return (
+      <button
+        onClick={() => { setActiveTab(id); setIsSidebarOpen(false); }}
+        className={`w-full flex items-center space-x-3 px-4 py-3 rounded-lg transition-all duration-200 group ${
+          activeTab === id 
+            ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/30' 
+            : 'text-slate-400 hover:bg-slate-800 hover:text-white'
+        }`}
+      >
+        <Icon size={20} className={`${activeTab === id ? 'text-white' : 'text-slate-400 group-hover:text-white'}`} />
+        <span className="font-medium">{label}</span>
+      </button>
+    );
+  };
+
+  // --- JIKA BELUM LOGIN ---
+  if (!currentUser) {
     return <Login onLogin={handleLogin} />;
   }
 
-  const MenuItems = [
-    { id: 'dashboard', label: TRANSLATIONS[lang].dashboard, icon: LayoutDashboard },
-    { id: 'sales_analytics', label: 'Sales Analytics', icon: BarChart3 },
-    { id: 'status', label: 'Live Monitoring', icon: Monitor },
-    { id: 'alarms', label: 'Alarms & Events', icon: Bell },
-    { id: 'simulator', label: TRANSLATIONS[lang].simulator, icon: ShoppingBag },
-    { id: 'inventory', label: TRANSLATIONS[lang].inventory, icon: Package },
-    { id: 'warehouse', label: 'Warehouse', icon: Building2 },
-    { id: 'planogram', label: 'Planogram', icon: List },
-    { id: 'logistics', label: 'Logistics / Route', icon: Truck },
-    { id: 'history', label: TRANSLATIONS[lang].transactions, icon: FileText },
-    { id: 'financials', label: 'Financials', icon: CreditCard },
-    { id: 'suppliers', label: 'Supplier Mgmt', icon: UserCircle },
-    { id: 'compliance', label: 'Compliance (LHDN)', icon: ShieldCheck },
-    { id: 'settings', label: 'Super Settings', icon: Settings },
-  ];
-
+  // --- MAIN APP ---
   return (
-    <div className="flex h-screen bg-slate-50 text-slate-900 font-sans">
-      {/* Sidebar */}
-      <aside className={`fixed inset-y-0 left-0 z-50 w-64 bg-slate-900 text-white transform transition-transform duration-300 ease-in-out ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'} md:relative md:translate-x-0 shadow-xl`}>
-        <div className="p-6 border-b border-slate-700 flex justify-between items-center">
-          <div>
-            <h1 className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-emerald-400">
-              VMMS Pro
-            </h1>
-            <p className="text-xs text-slate-400 mt-1">Vending Mgmt System</p>
+    <div className="flex h-screen bg-slate-50 overflow-hidden font-sans">
+      
+      {/* MOBILE OVERLAY */}
+      {isSidebarOpen && (
+        <div 
+          className="fixed inset-0 bg-black/60 backdrop-blur-sm z-40 lg:hidden"
+          onClick={() => setIsSidebarOpen(false)}
+        />
+      )}
+
+      {/* --- SIDEBAR --- */}
+      <aside className={`
+        fixed lg:static inset-y-0 left-0 z-50 w-72 bg-slate-900 text-white transform transition-transform duration-300 ease-in-out flex flex-col shadow-2xl
+        ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}
+      `}>
+        {/* Header Logo */}
+        <div className="p-6 border-b border-slate-800 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-gradient-to-tr from-blue-500 to-indigo-600 rounded-xl flex items-center justify-center shadow-lg shadow-blue-500/20">
+              <StoreIcon /> 
+            </div>
+            <div>
+              <h1 className="text-xl font-bold tracking-tight">VMMS<span className="text-blue-500">.Pro</span></h1>
+              <p className="text-[10px] text-slate-400 uppercase tracking-widest">
+                {userRole === 'super_admin' ? 'Enterprise Edition' : 'Manager View'}
+              </p>
+            </div>
           </div>
-          <button onClick={() => setIsSidebarOpen(false)} className="md:hidden text-slate-400 hover:text-white">
+          <button onClick={() => setIsSidebarOpen(false)} className="lg:hidden text-slate-400 hover:text-white">
             <X size={24} />
           </button>
         </div>
-        
-        <nav className="flex-1 overflow-y-auto py-4 space-y-1 px-3">
-          {MenuItems.map((item) => {
-            const Icon = item.icon;
-            return (
-              <button
-                key={item.id}
-                onClick={() => { setActiveTab(item.id); setIsSidebarOpen(false); }}
-                className={`w-full flex items-center space-x-3 px-4 py-3 rounded-lg transition-all duration-200 group ${
-                  activeTab === item.id 
-                    ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/50' 
-                    : 'text-slate-400 hover:bg-slate-800 hover:text-white'
-                }`}
-              >
-                <Icon size={20} className={`${activeTab === item.id ? 'text-white' : 'text-slate-500 group-hover:text-white'}`} />
-                <span className="font-medium">{item.label}</span>
-              </button>
-            );
-          })}
-        </nav>
 
-        <div className="p-4 border-t border-slate-800 bg-slate-900/50">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-emerald-500 to-blue-500 flex items-center justify-center text-xs font-bold">
-              HQ
+        {/* Navigation Scroll Area */}
+        <div className="flex-1 overflow-y-auto py-6 px-3 space-y-1 custom-scrollbar">
+          
+          <div className="text-xs font-bold text-slate-500 uppercase tracking-wider px-4 mb-2 mt-2">Operations</div>
+          {/* SAYA DAH UBAH LABEL KE STRING BIASA SUPAYA SENTIASA KELUAR */}
+          <NavItem id="dashboard" icon={LayoutDashboard} label="Overview Dashboard" />
+          <NavItem id="status" icon={Monitor} label="Live Monitoring" />
+          <NavItem id="inventory" icon={Package} label="Machine Stock" />
+          <NavItem id="alarms" icon={Bell} label="Alarms & Tickets" />
+          
+          {userRole === 'super_admin' && (
+            <>
+              <div className="text-xs font-bold text-slate-500 uppercase tracking-wider px-4 mb-2 mt-6">Logistics</div>
+              <NavItem id="warehouse" icon={Building2} label="Central Warehouse" />
+              <NavItem id="logistics" icon={Truck} label="Route Planning" /> {/* <-- INI YANG HILANG DULU */}
+              <NavItem id="suppliers" icon={UserCircle} label="Supplier PO" />
+            </>
+          )}
+
+          <div className="text-xs font-bold text-slate-500 uppercase tracking-wider px-4 mb-2 mt-6">Analytics</div>
+          <NavItem id="sales_analytics" icon={BarChart3} label="Sales Analytics" />
+          <NavItem id="history" icon={List} label="Transaction History" /> {/* <-- INI YANG HILANG DULU */}
+          <NavItem id="financials" icon={CreditCard} label="Financial Reports" />
+          <NavItem id="compliance" icon={ShieldCheck} label="Audit & Compliance" />
+          
+          {userRole === 'super_admin' && (
+            <>
+              <div className="text-xs font-bold text-slate-500 uppercase tracking-wider px-4 mb-2 mt-6">System</div>
+              <NavItem id="planogram" icon={Scan} label="Planogram Map" />
+              <NavItem id="simulator" icon={RefreshCw} label="System Simulator" />
+              <NavItem id="settings" icon={Settings} label="Super Settings" />
+            </>
+          )}
+        </div>
+
+        {/* --- PROFILE SECTION --- */}
+        <div className="p-4 border-t border-slate-800 bg-slate-950/50">
+          <div className="flex items-center gap-3 mb-4">
+            <div className={`w-10 h-10 rounded-full flex items-center justify-center text-white font-bold text-sm shadow-md ${
+                userRole === 'super_admin' ? 'bg-gradient-to-br from-emerald-400 to-teal-600' : 'bg-gradient-to-br from-blue-400 to-indigo-600'
+            }`}>
+              {currentUser.name.substring(0, 2).toUpperCase()}
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium text-white truncate">Admin HQ</p>
-              <p className="text-xs text-emerald-400 flex items-center gap-1">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
-                Online
+              <p className="text-sm font-medium text-white truncate" title={currentUser.name}>
+                {currentUser.name}
+              </p>
+              <p className="text-xs text-slate-400 truncate" title={currentUser.email}>
+                {currentUser.email}
               </p>
             </div>
+            <div className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></div>
+          </div>
+          
+          <div className="grid grid-cols-2 gap-2">
+            {userRole === 'super_admin' ? (
+                <button 
+                  onClick={handleReset} 
+                  className="flex items-center justify-center gap-2 px-3 py-2 bg-red-500/10 hover:bg-red-500/20 text-red-400 rounded-lg text-xs font-medium transition-colors"
+                >
+                  <Trash2 size={14} /> Reset
+                </button>
+            ) : (
+                <div className="flex items-center justify-center text-xs text-slate-500 bg-slate-900 rounded-lg border border-slate-800">
+                    Read Only
+                </div>
+            )}
+            
+            <button 
+              onClick={handleLogout} 
+              className="flex items-center justify-center gap-2 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-medium transition-colors"
+            >
+              <LogOut size={14} /> Logout
+            </button>
           </div>
         </div>
       </aside>
 
-      {/* Main Content */}
-      <main className="flex-1 overflow-y-auto h-full w-full">
-        {/* Header Mobile */}
-        <header className="bg-white border-b border-slate-200 p-4 sticky top-0 z-40 flex justify-between items-center shadow-sm">
-          <div className="flex items-center gap-3">
-            <button onClick={() => setIsSidebarOpen(true)} className="md:hidden p-2 text-slate-600 hover:bg-slate-100 rounded-lg">
+      {/* --- MAIN CONTENT --- */}
+      <main className="flex-1 overflow-y-auto bg-slate-50 relative">
+        
+        {/* Floating AI */}
+        <div className="fixed bottom-6 right-6 z-30">
+          <AiAssistant 
+            inventory={inventory} 
+            transactions={transactions} 
+            alarms={VM_CONFIG.ALARMS} 
+          />
+        </div>
+
+        {/* Header Bar */}
+        <header className="sticky top-0 z-20 bg-white/80 backdrop-blur-md border-b border-slate-200 px-6 py-4 flex items-center justify-between shadow-sm">
+          <div className="flex items-center gap-4">
+            <button onClick={() => setIsSidebarOpen(true)} className="lg:hidden p-2 hover:bg-slate-100 rounded-lg text-slate-600">
               <List size={24} />
             </button>
-            <h2 className="text-xl font-bold text-slate-800">
-              {MenuItems.find(m => m.id === activeTab)?.label}
-            </h2>
+            <div>
+              <h2 className="text-xl font-bold text-slate-800 capitalize flex items-center gap-2">
+                {activeTab.replace('_', ' ')}
+                {loading && <span className="text-xs font-normal text-blue-500 animate-pulse">(Syncing...)</span>}
+              </h2>
+              <p className="text-xs text-slate-400 font-mono">
+                 ID: {currentUser.id} | {lastUpdated ? lastUpdated.toLocaleTimeString() : 'Live'}
+              </p>
+            </div>
           </div>
 
-          <div className="flex items-center gap-2">
-             <button 
-               onClick={() => setLang(lang === 'en' ? 'bm' : 'en')}
-               className="flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-full transition-colors"
-             >
-               <Globe size={16} />
-               {lang === 'en' ? 'EN' : 'BM'}
-             </button>
-
-            {activeTab === 'settings' && (
-              <button 
-                onClick={handleReset}
-                className="p-2 text-red-500 hover:bg-red-50 hover:text-red-600 rounded-full transition-colors"
-                title="Reset Database"
-              >
-                <Trash2 size={18} />
-              </button>
-            )}
-            <button 
-              onClick={handleLogout}
-              className="md:hidden p-2 text-slate-500 hover:bg-slate-100 rounded-full"
-            >
-              <LogOut size={18} />
+          <div className="flex items-center gap-3">
+             <button onClick={fetchData} className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-full transition-all" title="Force Sync">
+              <RefreshCw size={20} className={loading ? 'animate-spin' : ''} />
             </button>
+            <div className="h-8 w-[1px] bg-slate-200 mx-2"></div>
+            
+            {/* Buang selector bahasa sebab kita dah hardcode English */}
+            <div className="flex items-center gap-2 px-3 py-1 bg-slate-100 rounded-lg text-xs font-bold text-slate-500">
+               EN (System Default)
+            </div>
           </div>
         </header>
 
+        {/* Content Body */}
         <div className="p-6 max-w-7xl mx-auto">
           
-          {/* --- SMART IMPORT --- */}
-          {/* Kita letak di atas Dashboard supaya user sentiasa nampak bila nak upload */}
           {activeTab === 'dashboard' && (
             <>
-              <div className="mb-6">
-                <SmartExcelImport onDataImported={handleSmartImport} />
-              </div>
+              {userRole === 'super_admin' && (
+                  <div className="mb-6 animate-in fade-in slide-in-from-top-4 duration-500">
+                    <SmartExcelImport onDataImported={handleSmartImport} />
+                  </div>
+              )}
               <Dashboard transactions={transactions} />
             </>
           )}
 
           {activeTab === 'sales_analytics' && <SalesAnalytics transactions={transactions} inventory={inventory} />}
-          {activeTab === 'status' && <StatusMonitoring />}
+          {activeTab === 'status' && <StatusMonitoring />} 
           {activeTab === 'alarms' && <Alarms />}
           {activeTab === 'inventory' && <Inventory slots={inventory} />}
           {activeTab === 'history' && <Transactions transactions={transactions} />}
-          {activeTab === 'logistics' && <RoutePlanning />}
-          {activeTab === 'compliance' && <Compliance />}
-          {activeTab === 'warehouse' && <Warehouse />}
-          {activeTab === 'planogram' && <Planogram />}
-          {activeTab === 'financials' && <Financials transactions={transactions} lang={lang} />}
-          {activeTab === 'suppliers' && <Suppliers />}
-          {activeTab === 'settings' && <SuperSettings />}
-          {activeTab === 'simulator' && <Simulator onUpdate={fetchData} />}
+          {activeTab === 'financials' && <Financials transactions={transactions} lang='en' />}
+          {activeTab === 'compliance' && <Compliance transactions={transactions} />}
+
+          {userRole === 'super_admin' && (
+            <>
+                {activeTab === 'logistics' && <RoutePlanning />}
+                {activeTab === 'warehouse' && <Warehouse />}
+                {activeTab === 'planogram' && <Planogram />}
+                {activeTab === 'suppliers' && <Suppliers />}
+                {activeTab === 'settings' && <SuperSettings user={currentUser} />} 
+                {activeTab === 'simulator' && <Simulator onUpdate={fetchData} />}
+            </>
+          )}
+
         </div>
       </main>
     </div>
   );
 };
+
+const StoreIcon = () => (
+  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-white">
+    <path d="m2 7 4.41-4.41A2 2 0 0 1 7.83 2h8.34a2 2 0 0 1 1.42.59L22 7"/>
+    <path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/>
+    <path d="M15 22v-4a2 2 0 0 0-2-2h-2a2 2 0 0 0-2 2v4"/>
+    <path d="M2 7h20"/>
+    <path d="M22 7v3a2 2 0 0 1-2 2v0a2.7 2.7 0 0 1-1.59-.63.7.7 0 0 0-.82 0A2.7 2.7 0 0 1 16 12a2.7 2.7 0 0 1-1.59-.63.7.7 0 0 0-.82 0A2.7 2.7 0 0 1 12 12a2.7 2.7 0 0 1-1.59-.63.7.7 0 0 0-.82 0A2.7 2.7 0 0 1 8 12a2.7 2.7 0 0 1-1.59-.63.7.7 0 0 0-.82 0A2.7 2.7 0 0 1 4 12v0a2 2 0 0 1-2-2V7"/>
+  </svg>
+);
 
 export default App;

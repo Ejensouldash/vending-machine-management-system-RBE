@@ -53,6 +53,19 @@ export default defineConfig(({ mode }) => {
                 });
               },
             },
+			// Dalam vite.config.ts -> server -> proxy:
+
+			// Tambah blok ini:
+			'/api/transactions': {
+			target: 'http://localhost:3001',
+			changeOrigin: true,
+			secure: false
+		},
+			'/api/ipay88': {
+			target: 'http://localhost:3001',
+			changeOrigin: true,
+			secure: false
+		},
             // --- PROXY CONFIGURATION END ---
         },
       },
